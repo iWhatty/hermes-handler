@@ -67,6 +67,30 @@ HermesHandler supports both:
 * Promise-returning listeners (MV3 / Firefox / polyfill)
 * Callback-style `sendResponse + return true`
 
+### Ignoring Messages Owned by Other Listeners
+
+Browser extensions can have multiple `runtime.onMessage` listeners alive at the same time. By default, HermesHandler preserves its original behavior and responds to unknown message types with an error envelope.
+
+If a listener should only claim messages it knows how to handle, enable `ignoreUnknown`:
+
+```js
+const hermes = new HermesHandler(handlers, {
+  ignoreUnknown: true
+});
+```
+
+When `ignoreUnknown` is enabled, `getListener()` returns `false` for runtime messages whose `type` is missing or not registered. That lets another listener handle the message instead of racing it with an unknown-message response.
+
+For scoped extension pages or richer ownership rules, provide `shouldHandle`:
+
+```js
+const hermes = new HermesHandler(handlers, {
+  shouldHandle: (msg) => msg?.scope === "popup" || hermes.has(msg?.type)
+});
+```
+
+When `shouldHandle` is provided, it is the runtime listener ownership predicate. If it returns `true`, HermesHandler uses normal dispatch behavior. If it returns `false`, the listener returns `false` without sending a response.
+
 ---
 
 ## Response Contract
@@ -157,6 +181,8 @@ HermesHandler aborts the signal once a request lifecycle completes.
 * `timeoutMs?: number`
 * `onUnknown?: (msg, ctx) => HermesResponse`
 * `onError?: (err, msg, ctx) => HermesResponse`
+* `ignoreUnknown?: boolean`
+* `shouldHandle?: (msg, sender) => boolean`
 * `logger?: HermesLogger | null`
 
 ---

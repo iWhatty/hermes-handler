@@ -55,6 +55,14 @@
 
 
 /**
+ * @callback HermesShouldHandleFn
+ * @param {any} msg
+ * @param {any} sender
+ * @returns {boolean}
+ */
+
+
+/**
  * @typedef {Object} HermesLogger
  * @property {(message?: any, ...optionalParams: any[]) => void} [debug]
  * @property {(message?: any, ...optionalParams: any[]) => void} [info]
@@ -256,6 +264,8 @@ export class HermesHandler {
      * @param {number} [options.timeoutMs=5000]  max time a handler can take before auto-fail
      * @param {(msg: any, ctx: any) => any} [options.onUnknown]  override unknown-type response
      * @param {(err: any, msg: any, ctx: any) => any} [options.onError] override error response
+     * @param {boolean} [options.ignoreUnknown=false]  let runtime listeners ignore messages without a registered handler
+     * @param {HermesShouldHandleFn} [options.shouldHandle]  runtime-listener ownership predicate
      * @param {HermesLogger|null} [options.logger=console]  set to null to silence logs
      */
     constructor(initialHandlers = {}, options = {}) {
@@ -263,6 +273,8 @@ export class HermesHandler {
             timeoutMs = 5000,
             onUnknown = (msg, _ctx) => ({ ok: false, error: `Unknown msg.type: ${msg?.type}` }),
             onError = (err) => ({ ok: false, error: toErrorString(err) }),
+            ignoreUnknown = false,
+            shouldHandle,
             logger = console
         } = options;
 
@@ -271,6 +283,8 @@ export class HermesHandler {
         this._timeoutMs = timeoutMs;
         this._onUnknown = onUnknown;
         this._onError = onError;
+        this._ignoreUnknown = ignoreUnknown === true;
+        this._shouldHandle = isFn(shouldHandle) ? shouldHandle : null;
 
         /** @type {HermesLogger|null} */
         this._logger = logger;
@@ -337,6 +351,10 @@ export class HermesHandler {
     */
     getListener() {
         return (msg, sender, sendResponse) => {
+            if (!this._ownsMessage(msg, sender)) {
+                return false;
+            }
+
             const p = this._dispatch(msg, sender);
 
 
@@ -361,6 +379,34 @@ export class HermesHandler {
             // Promise-returning style
             return p;
         };
+    }
+
+    /**
+     * Decide whether a runtime listener should claim this message.
+     *
+     * `dispatch()` intentionally bypasses this gate so direct callers keep the
+     * deterministic Hermes response contract for invalid and unknown messages.
+     *
+     * @param {any} msg
+     * @param {any} sender
+     * @returns {boolean}
+     */
+    _ownsMessage(msg, sender) {
+        if (this._shouldHandle) {
+            return this._shouldHandle(msg, sender) === true;
+        }
+
+        if (!this._ignoreUnknown) {
+            return true;
+        }
+
+        return !!(
+            msg &&
+            typeof msg === "object" &&
+            typeof msg.type === "string" &&
+            msg.type &&
+            this._handlers.has(msg.type)
+        );
     }
 
     // ---- Core dispatch ------------------------------------------------------

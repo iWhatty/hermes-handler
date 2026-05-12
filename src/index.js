@@ -14,5 +14,6 @@ export { HermesHandler } from "./HermesHandler.js";
  * @typedef {import("./HermesHandler.js").HermesMessage} HermesMessage
  * @typedef {import("./HermesHandler.js").HermesContext} HermesContext
  * @typedef {import("./HermesHandler.js").HermesHandlerFn} HermesHandlerFn
+ * @typedef {import("./HermesHandler.js").HermesShouldHandleFn} HermesShouldHandleFn
  * @typedef {import("./HermesHandler.js").HermesLogger} HermesLogger
  */

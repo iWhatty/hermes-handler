@@ -35,6 +35,14 @@ describe("HermesHandler", () => {
         expect(typeof res.error).toBe("string");
     });
 
+    it("keeps dispatch deterministic when ignoreUnknown is enabled", async () => {
+        const hermes = new HermesHandler({}, { ignoreUnknown: true });
+        const res = await hermes.dispatch({ type: "nope" });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toMatch(/Unknown msg\.type/);
+    });
+
     // ------------------------------------------------------------
     // Timeout Handling
     // ------------------------------------------------------------
@@ -104,5 +112,58 @@ describe("HermesHandler", () => {
         const res = await hermes.dispatch({ type: "checkSignal" });
 
         expect(res.ok).toBe(true);
+    });
+
+    // ------------------------------------------------------------
+    // Runtime Listener Ownership
+    // ------------------------------------------------------------
+
+    it("returns false from listener for unknown types when ignoreUnknown is enabled", () => {
+        const hermes = new HermesHandler(
+            {
+                ping: () => "pong"
+            },
+            { ignoreUnknown: true }
+        );
+        const listener = hermes.getListener();
+        const sendResponse = () => {
+            throw new Error("sendResponse should not be called");
+        };
+
+        expect(listener({ type: "nope" })).toBe(false);
+        expect(listener({ type: "nope" }, {}, sendResponse)).toBe(false);
+        expect(listener({ payload: "missing-type" }, {}, sendResponse)).toBe(false);
+    });
+
+    it("claims known types when ignoreUnknown is enabled", async () => {
+        const hermes = new HermesHandler(
+            {
+                ping: () => "pong"
+            },
+            { ignoreUnknown: true }
+        );
+        const listener = hermes.getListener();
+
+        await expect(listener({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+    });
+
+    it("uses shouldHandle as the runtime listener ownership predicate", async () => {
+        const hermes = new HermesHandler(
+            {
+                ping: () => "pong"
+            },
+            {
+                shouldHandle: (msg) => msg?.scope === "popup" || hermes.has(msg?.type)
+            }
+        );
+        const listener = hermes.getListener();
+
+        expect(listener({ type: "unknown", scope: "background" })).toBe(false);
+
+        await expect(listener({ type: "unknown", scope: "popup" })).resolves.toMatchObject({
+            ok: false,
+            error: "Unknown msg.type: unknown"
+        });
+        await expect(listener({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
     });
 });
