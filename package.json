@@ -4,6 +4,7 @@
   "description": "HermesHandler is a lightweight, framework-agnostic message router for browser extensions and event-driven systems, with strict {ok,result,error} envelopes, timeouts, cooperative cancellation, and safe normalization—ideal for reliable LLM agent backbones.",
   "license": "MIT",
   "author": "WATT3D",
+  "packageManager": "pnpm@10.33.2",
   "homepage": "https://github.com/iWhatty/HermesHandler-JS#readme",
   "repository": {
     "type": "git",
@@ -33,12 +34,12 @@
   },
   "scripts": {
     "clean": "rimraf dist",
-    "build": "npm run clean && npm run build:js && npm run build:types",
+    "build": "pnpm run clean && pnpm run build:js && pnpm run build:types",
     "build:js": "node ./scripts/copy-src-to-dist.mjs",
     "build:types": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "pnpm run build && pnpm test"
   },
   "devDependencies": {
     "eslint": "^9.0.0",

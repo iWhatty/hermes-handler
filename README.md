@@ -28,6 +28,13 @@ npm install hermes-handler
 
 ---
 
+## Project Docs
+
+* [Publishing checklist](docs/PUBLISHING.md)
+* [Roadmap and API direction](docs/ROADMAP.md)
+
+---
+
 ## Quick Start
 
 ```js
