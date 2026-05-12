@@ -8,6 +8,7 @@ HermesHandler is a small public npm package, so changes should stay focused, wel
 - Run `corepack pnpm test` for behavior changes.
 - Run `corepack pnpm run build` before publish-related changes.
 - Run `corepack pnpm run lint` when touching source or tests.
+- On Windows/Codex, read [docs/CODEX_WINDOWS.md](docs/CODEX_WINDOWS.md) before changing tooling or running publish/release commands.
 
 ## Code Style
 
@@ -22,4 +23,3 @@ HermesHandler is a small public npm package, so changes should stay focused, wel
 - Do not bump the npm version or publish unless explicitly requested.
 - Keep npm package contents aligned with `package.json#files`.
 - Treat `dist/` as generated output.
-
