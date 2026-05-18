@@ -1,5 +1,11 @@
 # HermesHandler
 
+[![npm](https://img.shields.io/npm/v/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
+[![downloads](https://img.shields.io/npm/dm/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/hermes-handler)](https://bundlephobia.com/package/hermes-handler)
+[![license](https://img.shields.io/npm/l/hermes-handler)](https://github.com/iWhatty/HermesHandler-JS/blob/main/LICENSE)
+[![stars](https://img.shields.io/github/stars/iWhatty/HermesHandler-JS?style=social)](https://github.com/iWhatty/HermesHandler-JS)
+
 HermesHandler is a lightweight, framework-agnostic message router for browser extensions and event-driven systems. It provides structured request dispatching with a strict response envelope
 { ok:true, result?, info? } | { ok:false, error, info? }, built-in timeout handling, cooperative cancellation, and safe normalization.
 
