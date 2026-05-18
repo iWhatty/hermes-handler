@@ -2,8 +2,8 @@
   "name": "hermes-handler",
   "version": "0.0.4",
   "description": "HermesHandler is a lightweight, framework-agnostic message router for browser extensions and event-driven systems, with strict {ok,result,error} envelopes, timeouts, cooperative cancellation, and safe normalization—ideal for reliable LLM agent backbones.",
-  "license": "MIT",
-  "author": "WATT3D",
+  "license": "AGPL-3.0-only",
+  "author": "WATT3D <WATT3D@protonmail.com>",
   "packageManager": "pnpm@10.33.2",
   "homepage": "https://github.com/iWhatty/HermesHandler-JS#readme",
   "repository": {
@@ -27,7 +27,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "ADDITIONAL_TERMS.md"
   ],
   "engines": {
     "node": ">=18"
