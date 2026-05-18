@@ -28,7 +28,8 @@
     "dist",
     "README.md",
     "LICENSE",
-    "ADDITIONAL_TERMS.md"
+    "ADDITIONAL_TERMS.md",
+    "robots.txt"
   ],
   "engines": {
     "node": ">=18"
