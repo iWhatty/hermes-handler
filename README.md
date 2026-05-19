@@ -23,6 +23,7 @@ Designed for reliability and clarity, HermesHandler is especially well-suited fo
 * 🧠 LLM-friendly deterministic contract
 * 🧩 Framework-agnostic (no runtime dependencies)
 * 📘 Type-safe via generated `.d.ts`
+* 🪶 Tiny client-side helper via `hermes-handler/client` subpath (≈ 1 KB minified) — speaks the same wire envelope without bringing the router class into size-sensitive bundles
 
 ---
 
@@ -38,6 +39,38 @@ npm install hermes-handler
 
 * [Publishing checklist](docs/PUBLISHING.md)
 * [Roadmap and API direction](docs/ROADMAP.md)
+
+---
+
+## Half-and-half: server router + tiny client
+
+HermesHandler has two natural sides:
+
+- **Server side** — runs the handlers. You want the full `HermesHandler` class here (routing, normalization, per-handler timeout, AbortSignal plumbing).
+- **Client side** — sends a request and parses the envelope. You don't need the router; you need ~1 KB of wire-correlation glue.
+
+For size-sensitive contexts (page-world bundles, popups, child processes), import the client subpath instead of the class:
+
+```js
+// page-world / popup / inline-injected bundle
+import { createHermesClient } from "hermes-handler/client";
+
+const dispatch = createHermesClient({
+  send:      (msg) => window.parent.postMessage(msg, "*"),
+  subscribe: (handler) => {
+    const listener = (e) => handler(e.data);
+    window.addEventListener("message", listener);
+    return () => window.removeEventListener("message", listener);
+  },
+  defaultTimeoutMs: 8000,
+});
+
+const res = await dispatch({ type: "code-source.fetch", payload: { url } });
+if (res.ok) console.log(res.result);
+else        console.warn(res.error, res.info);
+```
+
+`createHermesClient` handles `requestId` correlation, per-call timeout, `AbortSignal`, and envelope normalization. The wire shape is the contract; the client is one implementation of it. Half-and-half is fine and often correct.
 
 ---
 

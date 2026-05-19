@@ -1,0 +1,261 @@
+import { describe, it, expect, vi } from "vitest";
+import { createHermesClient } from "../src/client.js";
+import { HermesHandler } from "../src/HermesHandler.js";
+
+/**
+ * Spin up an in-process loopback transport: client.send pushes a request
+ * into the server, the server responds back through a subscriber queue.
+ * This is the same wire shape the postMessage / chrome.runtime callers use.
+ */
+function loopback(handlers, opts) {
+    const subscribers = new Set();
+
+    const server = new HermesHandler(handlers, opts);
+
+    const send = (msg) => {
+        // Dispatch into the server and post the response back to subscribers.
+        // Server is async; don't await — clients aren't synchronous either.
+        server.dispatch(msg).then((res) => {
+            const wire = { ...res, requestId: msg.requestId };
+            for (const handler of subscribers) handler(wire);
+        });
+    };
+
+    const subscribe = (handler) => {
+        subscribers.add(handler);
+        return () => subscribers.delete(handler);
+    };
+
+    return { send, subscribe, server };
+}
+
+describe("createHermesClient", () => {
+    it("resolves with an ok envelope on a successful round-trip", async () => {
+        const { send, subscribe } = loopback({
+            ping: () => "pong",
+        });
+        const dispatch = createHermesClient({ send, subscribe });
+
+        const res = await dispatch({ type: "ping" });
+
+        expect(res).toEqual({ ok: true, result: "pong" });
+    });
+
+    // The next two tests exercise the *client* in isolation against a
+    // controlled wire emission. The server's `info` normalization (wraps
+    // handler-provided info as info.handlerInfo to disambiguate from
+    // server-collected extras) is server behavior; the client just
+    // forwards whatever envelope the wire carries.
+
+    it("preserves info on a success envelope", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                for (const h of subscribers) {
+                    h({ ok: true, result: 42, info: { hits: 3 }, requestId: msg.requestId });
+                }
+            },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+        });
+
+        const res = await dispatch({ type: "stats" });
+
+        expect(res).toEqual({ ok: true, result: 42, info: { hits: 3 } });
+    });
+
+    it("forwards an error envelope when the wire carries ok:false", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                for (const h of subscribers) {
+                    h({ ok: false, error: "kaboom", info: { code: 7 }, requestId: msg.requestId });
+                }
+            },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+        });
+
+        const res = await dispatch({ type: "boom" });
+
+        expect(res).toEqual({ ok: false, error: "kaboom", info: { code: 7 } });
+    });
+
+    it("integrates cleanly with a real HermesHandler server (info wrapped as handlerInfo)", async () => {
+        // End-to-end sanity check: real server, real client. Documents that
+        // the server reshapes handler-emitted info into info.handlerInfo —
+        // future maintainers should expect this when wiring the two together.
+        const { send, subscribe } = loopback({
+            boom: () => ({ ok: false, error: "kaboom", info: { code: 7 } }),
+        });
+        const dispatch = createHermesClient({ send, subscribe });
+
+        const res = await dispatch({ type: "boom" });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toBe("kaboom");
+        expect(res.info?.handlerInfo).toEqual({ code: 7 });
+    });
+
+    it("filters responses by requestId — concurrent calls don't cross-contaminate", async () => {
+        const { send, subscribe } = loopback({
+            echo: (msg) => msg.payload,
+        });
+        const dispatch = createHermesClient({ send, subscribe });
+
+        const [a, b] = await Promise.all([
+            dispatch({ type: "echo", payload: "first" }),
+            dispatch({ type: "echo", payload: "second" }),
+        ]);
+
+        expect(a).toEqual({ ok: true, result: "first" });
+        expect(b).toEqual({ ok: true, result: "second" });
+    });
+
+    it("times out per the defaultTimeoutMs option", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: () => { /* never replies */ },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            defaultTimeoutMs: 30,
+        });
+
+        const res = await dispatch({ type: "hang" });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toMatch(/timeout/i);
+        expect(res.info?.timeout).toBe(true);
+    });
+
+    it("per-call timeoutMs overrides the default", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: () => { /* never replies */ },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            defaultTimeoutMs: 5000,
+        });
+
+        const start = Date.now();
+        const res = await dispatch({ type: "hang", timeoutMs: 25 });
+        const elapsed = Date.now() - start;
+
+        expect(res.ok).toBe(false);
+        expect(elapsed).toBeLessThan(500);
+    });
+
+    it("timeoutMs:0 disables the client-side timeout", async () => {
+        const { send, subscribe } = loopback({
+            slow: async () => {
+                await new Promise((r) => setTimeout(r, 50));
+                return "done";
+            },
+        });
+        const dispatch = createHermesClient({ send, subscribe, defaultTimeoutMs: 10 });
+
+        const res = await dispatch({ type: "slow", timeoutMs: 0 });
+
+        expect(res).toEqual({ ok: true, result: "done" });
+    });
+
+    it("AbortSignal cancels an in-flight dispatch", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: () => { /* never replies */ },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            defaultTimeoutMs: 0,
+        });
+
+        const ctrl = new AbortController();
+        const promise = dispatch({ type: "hang", signal: ctrl.signal });
+        setTimeout(() => ctrl.abort(), 10);
+
+        const res = await promise;
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toBe("Aborted");
+        expect(res.info?.aborted).toBe(true);
+    });
+
+    it("AbortSignal that is already aborted resolves immediately", async () => {
+        const dispatch = createHermesClient({
+            send: vi.fn(),
+            subscribe: () => () => { },
+        });
+
+        const ctrl = new AbortController();
+        ctrl.abort();
+
+        const res = await dispatch({ type: "hang", signal: ctrl.signal });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toBe("Aborted");
+    });
+
+    it("a throwing send resolves the dispatch with an error envelope", async () => {
+        const dispatch = createHermesClient({
+            send: () => { throw new Error("transport blew up"); },
+            subscribe: () => () => { },
+            defaultTimeoutMs: 0,
+        });
+
+        const res = await dispatch({ type: "echo" });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toMatch(/transport blew up/);
+    });
+
+    it("rejects an empty type with a clear error envelope", async () => {
+        const dispatch = createHermesClient({
+            send: vi.fn(),
+            subscribe: () => () => { },
+        });
+
+        const res = await dispatch({ type: "" });
+
+        expect(res.ok).toBe(false);
+        expect(res.error).toMatch(/non-empty string/i);
+    });
+
+    it("uses a custom idGen when provided", async () => {
+        const seen = [];
+        const subscribers = new Set();
+        let nextId = 1000;
+
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                seen.push(msg.requestId);
+                // echo
+                const wire = { ok: true, result: msg.payload, requestId: msg.requestId };
+                for (const h of subscribers) h(wire);
+            },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            idGen: () => `custom-${nextId++}`,
+        });
+
+        await dispatch({ type: "echo", payload: 1 });
+        await dispatch({ type: "echo", payload: 2 });
+
+        expect(seen).toEqual(["custom-1000", "custom-1001"]);
+    });
+
+    it("throws synchronously on factory misuse", () => {
+        expect(() => createHermesClient({ subscribe: () => () => { } })).toThrow(/send/);
+        expect(() => createHermesClient({ send: () => { } })).toThrow(/subscribe/);
+    });
+});
