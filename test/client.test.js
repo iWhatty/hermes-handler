@@ -258,4 +258,170 @@ describe("createHermesClient", () => {
         expect(() => createHermesClient({ subscribe: () => () => { } })).toThrow(/send/);
         expect(() => createHermesClient({ send: () => { } })).toThrow(/subscribe/);
     });
+
+    // ------------------------------------------------------------
+    // Pub/sub channel (.on / .off / broadcast routing)
+    // ------------------------------------------------------------
+
+    describe("pub/sub channel", () => {
+        function makeFanout() {
+            const subscribers = new Set();
+            return {
+                send: () => { /* not used in these tests */ },
+                subscribe: (handler) => {
+                    subscribers.add(handler);
+                    return () => subscribers.delete(handler);
+                },
+                emit(wire) {
+                    for (const h of subscribers) h(wire);
+                },
+            };
+        }
+
+        it("routes broadcasts (no requestId) to .on() subscribers by type", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+
+            const fps = [];
+            const css = [];
+            dispatch.on("fps", (payload) => fps.push(payload));
+            dispatch.on("css", (payload) => css.push(payload));
+
+            transport.emit({ type: "fps", payload: { v: 60 } });
+            transport.emit({ type: "css", payload: { selector: "#x" } });
+            transport.emit({ type: "fps", payload: { v: 30 } });
+
+            expect(fps).toEqual([{ v: 60 }, { v: 30 }]);
+            expect(css).toEqual([{ selector: "#x" }]);
+        });
+
+        it("ignores broadcasts for unsubscribed types silently", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+            expect(() => transport.emit({ type: "unrelated", payload: 1 })).not.toThrow();
+        });
+
+        it("returns an unsubscribe function from .on()", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+
+            const seen = [];
+            const off = dispatch.on("evt", (p) => seen.push(p));
+            transport.emit({ type: "evt", payload: 1 });
+            off();
+            transport.emit({ type: "evt", payload: 2 });
+
+            expect(seen).toEqual([1]);
+        });
+
+        it("supports multiple subscribers per type and fans out", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+
+            const a = [];
+            const b = [];
+            dispatch.on("evt", (p) => a.push(p));
+            dispatch.on("evt", (p) => b.push(p));
+            transport.emit({ type: "evt", payload: 1 });
+            transport.emit({ type: "evt", payload: 2 });
+
+            expect(a).toEqual([1, 2]);
+            expect(b).toEqual([1, 2]);
+        });
+
+        it("isolates one handler's throw from others", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+            const seen = [];
+            dispatch.on("evt", () => { throw new Error("boom"); });
+            dispatch.on("evt", (p) => seen.push(p));
+            transport.emit({ type: "evt", payload: 1 });
+            expect(seen).toEqual([1]);
+        });
+
+        it(".off(type, handler) removes a specific subscriber", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+            const seen = [];
+            const handler = (p) => seen.push(p);
+            dispatch.on("evt", handler);
+            transport.emit({ type: "evt", payload: 1 });
+            dispatch.off("evt", handler);
+            transport.emit({ type: "evt", payload: 2 });
+            expect(seen).toEqual([1]);
+        });
+
+        it("dispatch responses with requestId are routed to pending dispatches, NOT broadcast handlers", async () => {
+            // Even if a broadcast handler is registered for the same `type`,
+            // a message with a matching requestId routes to dispatch.
+            const subscribers = new Set();
+            let serverReplyTo;
+            const server = new HermesHandler({ ping: () => "pong" });
+            const transport = {
+                send: (msg) => {
+                    server.dispatch(msg).then((res) => {
+                        for (const h of subscribers) h(res);
+                    });
+                },
+                subscribe: (handler) => {
+                    subscribers.add(handler);
+                    return () => subscribers.delete(handler);
+                },
+            };
+            const dispatch = createHermesClient(transport);
+
+            const broadcasts = [];
+            dispatch.on("ping", (p) => broadcasts.push(p));
+
+            const res = await dispatch({ type: "ping" });
+            expect(res).toEqual({ ok: true, result: "pong" });
+            // Broadcast handler should NOT fire — the response had a requestId.
+            expect(broadcasts).toEqual([]);
+        });
+
+        it("broadcasts and dispatch responses coexist on the same transport", async () => {
+            const subscribers = new Set();
+            const server = new HermesHandler({ ping: () => "pong" });
+            const transport = {
+                send: (msg) => {
+                    server.dispatch(msg).then((res) => {
+                        for (const h of subscribers) h(res);
+                    });
+                },
+                subscribe: (handler) => {
+                    subscribers.add(handler);
+                    return () => subscribers.delete(handler);
+                },
+            };
+            const dispatch = createHermesClient(transport);
+
+            const seen = [];
+            dispatch.on("server-push", (p) => seen.push(p));
+
+            // Simulate a server-initiated broadcast hitting the same subscribers.
+            for (const h of subscribers) h({ type: "server-push", payload: { tick: 1 } });
+            const res = await dispatch({ type: "ping" });
+            for (const h of subscribers) h({ type: "server-push", payload: { tick: 2 } });
+
+            expect(res).toEqual({ ok: true, result: "pong" });
+            expect(seen).toEqual([{ tick: 1 }, { tick: 2 }]);
+        });
+
+        it(".close() unsubscribes from the transport", () => {
+            let unsubscribed = false;
+            const transport = {
+                send: () => {},
+                subscribe: () => () => { unsubscribed = true; },
+            };
+            const dispatch = createHermesClient(transport);
+            dispatch.close();
+            expect(unsubscribed).toBe(true);
+        });
+
+        it(".on() rejects malformed args", () => {
+            const dispatch = createHermesClient({ send: () => {}, subscribe: () => () => {} });
+            expect(() => dispatch.on("", () => {})).toThrow(/non-empty/);
+            expect(() => dispatch.on("evt", null)).toThrow(/must be a function/);
+        });
+    });
 });
