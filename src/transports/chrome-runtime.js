@@ -35,7 +35,8 @@
  */
 export function chromeRuntimeTransport(opts = {}) {
     const { tabId, runtime } = opts;
-    const r = runtime ?? (typeof globalThis !== "undefined" ? (globalThis.browser ?? globalThis.chrome) : undefined);
+    const g = /** @type {any} */ (typeof globalThis !== "undefined" ? globalThis : {});
+    const r = runtime ?? g.browser ?? g.chrome;
     if (!r || !r.runtime) {
         throw new Error("chromeRuntimeTransport: no chrome/browser runtime available");
     }
@@ -43,10 +44,12 @@ export function chromeRuntimeTransport(opts = {}) {
     /** @type {Set<(msg: any) => void>} */
     const handlers = new Set();
     let listenerAttached = false;
+    /** @type {((msg: any) => void) | null} */
     let attachedListener = null;
 
     const ensureListener = () => {
         if (listenerAttached) return;
+        /** @param {any} msg */
         attachedListener = (msg) => {
             for (const h of handlers) h(msg);
         };
@@ -54,11 +57,13 @@ export function chromeRuntimeTransport(opts = {}) {
         listenerAttached = true;
     };
 
+    /** @param {any} msg */
     const send = (msg) => {
         // sendMessage returns a Promise (Manifest V3 browser.* / chrome.* with
         // returns-promise polyfill). For each dispatch, the response is the
         // sendResponse callback value — we feed it into every subscribed
         // handler so the hermes client matches by requestId.
+        /** @param {any} responseOrUndef */
         const apply = (responseOrUndef) => {
             if (responseOrUndef === undefined) return;
             for (const h of handlers) h(responseOrUndef);
@@ -75,6 +80,7 @@ export function chromeRuntimeTransport(opts = {}) {
         }
     };
 
+    /** @param {(msg: any) => void} handler */
     const subscribe = (handler) => {
         handlers.add(handler);
         ensureListener();

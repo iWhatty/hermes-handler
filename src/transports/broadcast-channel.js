@@ -26,14 +26,22 @@
  */
 export function broadcastChannelTransport(channelOrName, opts = {}) {
     const Channel = opts.Channel ?? (typeof globalThis !== "undefined" ? globalThis.BroadcastChannel : undefined);
-    if (!Channel && typeof channelOrName === "string") {
-        throw new Error("broadcastChannelTransport: no BroadcastChannel constructor available");
+    let channel;
+    if (typeof channelOrName === "string") {
+        if (!Channel) {
+            throw new Error("broadcastChannelTransport: no BroadcastChannel constructor available");
+        }
+        channel = new Channel(channelOrName);
+    } else {
+        channel = channelOrName;
     }
-    const channel = typeof channelOrName === "string" ? new Channel(channelOrName) : channelOrName;
 
+    /** @param {any} msg */
     const send = (msg) => channel.postMessage(msg);
 
+    /** @param {(msg: any) => void} handler */
     const subscribe = (handler) => {
+        /** @param {any} event */
         const listener = (event) => handler(event.data);
         channel.addEventListener("message", listener);
         return () => channel.removeEventListener("message", listener);

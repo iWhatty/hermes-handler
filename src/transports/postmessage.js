@@ -46,7 +46,7 @@
  */
 
 /**
- * @param {Window | MessagePort | Worker | { postMessage: Function, addEventListener: Function, removeEventListener: Function }} target
+ * @param {any} target  Window, MessagePort, Worker, or anything with postMessage + addEventListener.
  * @param {PostMessageTransportOptions} [opts]
  */
 export function postMessageTransport(target, opts = {}) {
@@ -60,18 +60,24 @@ export function postMessageTransport(target, opts = {}) {
         throw new TypeError("postMessageTransport: target must have addEventListener()");
     }
 
+    // Window#postMessage takes (msg, targetOrigin). MessagePort/Worker take
+    // just (msg). Window has a `location` property; MessagePort doesn't.
+    // Cache the branch at construction time so send() stays hot.
+    const isWindow = "location" in target || target === globalThis;
+
+    /** @param {any} msg */
     const send = (msg) => {
         const enveloped = { ...outbound, ...msg };
-        // Window#postMessage takes (msg, targetOrigin). MessagePort/Worker
-        // take just (msg). Detect by whether target has a `location` (Window).
-        if (typeof target.location !== "undefined" || target === globalThis) {
+        if (isWindow) {
             target.postMessage(enveloped, targetOrigin);
         } else {
             target.postMessage(enveloped);
         }
     };
 
+    /** @param {(msg: any) => void} handler */
     const subscribe = (handler) => {
+        /** @param {any} event */
         const listener = (event) => {
             // For same-window page↔content bridges, require event.source ===
             // target so we don't pick up our own outbound messages.
