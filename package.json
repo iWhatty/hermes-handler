@@ -5,13 +5,13 @@
   "license": "SEE LICENSE IN LICENSE",
   "author": "WATT3D <WATT3D@protonmail.com>",
   "packageManager": "pnpm@10.33.2",
-  "homepage": "https://github.com/iWhatty/HermesHandler-JS#readme",
+  "homepage": "https://github.com/iWhatty/hermes-handler#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iWhatty/HermesHandler-JS.git"
+    "url": "git+https://github.com/iWhatty/hermes-handler.git"
   },
   "bugs": {
-    "url": "https://github.com/iWhatty/HermesHandler-JS/issues"
+    "url": "https://github.com/iWhatty/hermes-handler/issues"
   },
   "type": "module",
   "sideEffects": false,
