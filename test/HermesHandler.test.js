@@ -166,4 +166,44 @@ describe("HermesHandler", () => {
         });
         await expect(listener({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
     });
+
+    // ------------------------------------------------------------
+    // requestId echo (manual-transport correlation)
+    // ------------------------------------------------------------
+
+    it("echoes requestId from request into response (success)", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        const res = await hermes.dispatch({ type: "ping", requestId: "abc-123" });
+        expect(res).toEqual({ ok: true, result: "pong", requestId: "abc-123" });
+    });
+
+    it("echoes requestId into error responses (unknown type)", async () => {
+        const hermes = new HermesHandler({});
+        const res = await hermes.dispatch({ type: "nope", requestId: "rid-1" });
+        expect(res.ok).toBe(false);
+        expect(res.requestId).toBe("rid-1");
+    });
+
+    it("echoes requestId for invalid-message early returns", async () => {
+        const hermes = new HermesHandler({});
+        const res1 = await hermes.dispatch({ requestId: "rid-2" });
+        expect(res1).toMatchObject({ ok: false, requestId: "rid-2" });
+        const res2 = await hermes.dispatch({ type: "", requestId: "rid-3" });
+        expect(res2).toMatchObject({ ok: false, requestId: "rid-3" });
+    });
+
+    it("does not stamp requestId when the request has none", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        const res = await hermes.dispatch({ type: "ping" });
+        expect(res).toEqual({ ok: true, result: "pong" });
+        expect("requestId" in res).toBe(false);
+    });
+
+    it("preserves an explicit requestId set by the handler", async () => {
+        const hermes = new HermesHandler({
+            relay: () => ({ ok: true, result: "x", requestId: "handler-set" })
+        });
+        const res = await hermes.dispatch({ type: "relay", requestId: "request-set" });
+        expect(res.requestId).toBe("handler-set");
+    });
 });

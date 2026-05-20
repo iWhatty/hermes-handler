@@ -106,9 +106,13 @@ function toErrorString(err) {
 }
 
 
-const HERMES_KEYS = new Set(["ok", "result", "error", "info"]);
-const HERMES_KEYS_SUCCESS = new Set(["ok", "result", "info"]);
-const HERMES_KEYS_ERROR = new Set(["ok", "error", "info"]);
+// requestId is part of the canonical envelope spec (see HermesResponse
+// typedef) so it survives normalization instead of being shunted into
+// info.handlerInfo. Handlers may set it explicitly; _dispatch also
+// auto-echoes it from request → response for manual-transport correlation.
+const HERMES_KEYS = new Set(["ok", "result", "error", "info", "requestId"]);
+const HERMES_KEYS_SUCCESS = new Set(["ok", "result", "info", "requestId"]);
+const HERMES_KEYS_ERROR = new Set(["ok", "error", "info", "requestId"]);
 
 /**
  * Collect non-canonical fields into an `info` bag.
@@ -150,7 +154,7 @@ function collectInfo(payload, skipKeys) {
  *
  * @param {any} payload
  * @param {HermesLogger|null} logger
- * @returns {{ ok: true, result?: any, info?: any } | { ok: false, error: string, info?: any }}
+ * @returns {{ ok: true, result?: any, info?: any, requestId?: string } | { ok: false, error: string, info?: any, requestId?: string }}
  */
 function normalizePayload(payload, logger = null) {
     if (!payload || typeof payload !== "object" || !("ok" in payload)) {
@@ -169,19 +173,22 @@ function normalizePayload(payload, logger = null) {
         // Extras include accidental result + any unexpected keys + handlerInfo
         const info = collectInfo(payload, HERMES_KEYS_ERROR) /* includes result + others */;
 
+        /** @type {{ ok: false, error: string, info?: any, requestId?: string }} */
+        const errOut = { ok: false, error: payload.error };
+        if ("requestId" in payload) errOut.requestId = payload.requestId;
         if (info) {
             logger?.warn?.("[Hermes] ok:false response contained extra fields; preserved in info", {
                 extraKeys: Object.keys(info)
             });
-            return { ok: false, error: payload.error, info };
+            errOut.info = info;
         }
-
-        return { ok: false, error: payload.error };
+        return errOut;
     }
 
-    /** @type {{ ok: true, result?: any, info?: any }} */
+    /** @type {{ ok: true, result?: any, info?: any, requestId?: string }} */
     const out = { ok: true };
     if ("result" in payload) out.result = payload.result;
+    if ("requestId" in payload) out.requestId = payload.requestId;
 
     // Extras include accidental error + any unexpected keys + handlerInfo
     const info = collectInfo(payload, HERMES_KEYS_SUCCESS) /* includes error + others */;
@@ -197,11 +204,29 @@ function normalizePayload(payload, logger = null) {
 }
 
 /**
+ * Normalize, optionally stamp requestId, then shallow-freeze. The
+ * requestId is echoed from request → response so manual transports
+ * (postMessage, BroadcastChannel, MessageChannel, …) get correlation
+ * for free; chrome.runtime via `getListener()` doesn't need it because
+ * the runtime correlates by sendResponse callback.
+ *
+ * If the handler already set `requestId` on the response (rare), the
+ * handler's value wins.
+ *
  * @param {any} payload
  * @param {HermesLogger|null} logger
+ * @param {string|undefined} [requestId]
  */
-function freezeNormalized(payload, logger = null) {
+function freezeNormalized(payload, logger = null, requestId = undefined) {
     const normalized = normalizePayload(payload, logger);
+    if (
+        normalized &&
+        typeof normalized === "object" &&
+        requestId !== undefined &&
+        !("requestId" in normalized)
+    ) {
+        normalized.requestId = requestId;
+    }
     return normalized && typeof normalized === "object"
         ? Object.freeze(normalized)
         : normalized;
@@ -365,7 +390,8 @@ export class HermesHandler {
                     sendResponse(
                         freezeNormalized(
                             this._onError(err, msg, { sender, tabId: sender?.tab?.id }),
-                            this._logger
+                            this._logger,
+                            msg?.requestId
                         )
                     )
                 );
@@ -417,14 +443,20 @@ export class HermesHandler {
      */
     async _dispatch(msg, sender) {
 
+        // Echo requestId from request → response so manual transports
+        // (postMessage, MessageChannel, BroadcastChannel, …) get correlation
+        // without hand-plumbing. Captured up here so all early-return paths
+        // (invalid message, missing type, unknown handler) stamp it too.
+        const reqId = (msg && typeof msg === "object") ? msg.requestId : undefined;
+
         if (!msg || typeof msg !== "object") {
-            return freezeNormalized({ ok: false, error: "Invalid message: msg expected to be an object" }, this._logger);
+            return freezeNormalized({ ok: false, error: "Invalid message: msg expected to be an object" }, this._logger, reqId);
         }
 
         const type = msg.type;
 
         if (typeof type !== "string" || !type) {
-            return freezeNormalized({ ok: false, error: "Invalid message: msg missing string 'type'" }, this._logger);
+            return freezeNormalized({ ok: false, error: "Invalid message: msg missing string 'type'" }, this._logger, reqId);
         }
 
 
@@ -432,7 +464,7 @@ export class HermesHandler {
         let responded = false;
 
         /** @type {HermesResponse<any>} */
-        let payloadToReturn = freezeNormalized({ ok: false, error: "No response" }, this._logger);
+        let payloadToReturn = freezeNormalized({ ok: false, error: "No response" }, this._logger, reqId);
 
 
         // Cooperative cancellation: handlers MAY honor ctx.signal
@@ -444,7 +476,7 @@ export class HermesHandler {
             sender,
             tabId: sender?.tab?.id,
             signal: controller.signal,
-            requestId: msg?.requestId,
+            requestId: reqId,
             send: (/** @type {any} */payload) => {
                 if (responded) {
                     this._logger?.warn?.("[Hermes] Multiple send attempts", { type });
@@ -455,7 +487,7 @@ export class HermesHandler {
 
                 // Freeze to prevent accidental mutation after responding
                 // (shallow freeze is enough and avoids surprising perf hits).
-                payloadToReturn = freezeNormalized(payload, this._logger);
+                payloadToReturn = freezeNormalized(payload, this._logger, reqId);
 
             }
 
