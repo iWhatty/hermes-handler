@@ -21,6 +21,11 @@
 
     "isolatedModules": false
   },
-  "include": ["src/**/*.js"],
-  "exclude": ["node_modules", "dist", "test"]
+  "include": ["src/**/*.js", "src/**/*.d.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "src/index.js"
+  ]
 }
