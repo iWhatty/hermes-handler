@@ -201,46 +201,8 @@ export function freezeNormalized(payload, logger = null, requestId = undefined) 
         : normalized;
 }
 
-// ============================================================================
-// Parsing (client side: inbound wire message → typed envelope)
-// ============================================================================
-
-/**
- * @typedef {{ ok: true, result?: any, info?: any }} HermesClientOk
- * @typedef {{ ok: false, error: string, info?: any }} HermesClientErr
- * @typedef {HermesClientOk | HermesClientErr} HermesClientEnvelope
- */
-
-/**
- * Parse an incoming wire message into a canonical client-side envelope.
- * Used by `createHermesClient` when a dispatch response arrives.
- *
- * Returns one of:
- *   - { ok: true, result?, info? }                     ← well-formed success
- *   - { ok: false, error, info? }                      ← well-formed error
- *   - { ok: false, error: "...malformed...", info: {...} }   ← shape violation
- *
- * @param {any} msg
- * @param {{ requestId?: string, type?: string }} [ctx]  Optional info for malformed-response diagnostics
- * @returns {HermesClientEnvelope}
- */
-export function parseWireResponse(msg, ctx = {}) {
-    if (msg && msg.ok === true) {
-        /** @type {HermesClientOk} */
-        const r = { ok: true };
-        if ("result" in msg) r.result = msg.result;
-        if (msg.info !== undefined) r.info = msg.info;
-        return r;
-    }
-    if (msg && msg.ok === false && typeof msg.error === "string") {
-        /** @type {HermesClientErr} */
-        const r = { ok: false, error: msg.error };
-        if (msg.info !== undefined) r.info = msg.info;
-        return r;
-    }
-    return {
-        ok: false,
-        error: "Hermes client: malformed response from server",
-        info: { received: msg, ...ctx },
-    };
-}
+// NOTE: parseWireResponse (the inverse of normalize, used on the
+// client side to parse incoming wire messages) lives in
+// `./wire.js` — kept separate so client bundles don't pull in
+// this module's normalize + marker + key sets (~4 KB gz that
+// tree-shaking can't strip when the modules share a file).

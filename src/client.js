@@ -26,7 +26,7 @@
 //
 // The wire shape is the contract; the class is one implementation of it.
 
-import { parseWireResponse } from "./internal/envelope.js";
+import { parseWireResponse } from "./internal/wire.js";
 
 /**
  * @typedef {Object} HermesClientRequest
