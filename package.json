@@ -1,6 +1,6 @@
 {
   "name": "hermes-handler",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "HermesHandler is a lightweight, framework-agnostic message router for browser extensions and event-driven systems, with strict {ok,result,error} envelopes, timeouts, cooperative cancellation, and safe normalization—ideal for reliable LLM agent backbones.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "WATT3D <WATT3D@protonmail.com>",
@@ -26,6 +26,18 @@
     "./client": {
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
+    },
+    "./transports/postmessage": {
+      "types": "./dist/transports/postmessage.d.ts",
+      "import": "./dist/transports/postmessage.js"
+    },
+    "./transports/chrome-runtime": {
+      "types": "./dist/transports/chrome-runtime.d.ts",
+      "import": "./dist/transports/chrome-runtime.js"
+    },
+    "./transports/broadcast-channel": {
+      "types": "./dist/transports/broadcast-channel.d.ts",
+      "import": "./dist/transports/broadcast-channel.js"
     }
   },
   "files": [
