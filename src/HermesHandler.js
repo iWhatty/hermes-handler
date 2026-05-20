@@ -172,6 +172,7 @@ function normalizePayload(payload, logger = null) {
         return payload;
     }
     if (!payload || typeof payload !== "object" || !("ok" in payload)) {
+        /** @type {{ ok: true, result?: any }} */
         const out = { ok: true, result: payload };
         Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
         return out;
