@@ -206,4 +206,76 @@ describe("HermesHandler", () => {
         const res = await hermes.dispatch({ type: "relay", requestId: "request-set" });
         expect(res.requestId).toBe("handler-set");
     });
+
+    // ------------------------------------------------------------
+    // Per-handler config blocks
+    // ------------------------------------------------------------
+
+    it("accepts handler map entries as { handler, timeoutMs } config objects", async () => {
+        const hermes = new HermesHandler({
+            ping: () => "pong",
+            slow: {
+                timeoutMs: 50,
+                handler: () => new Promise((r) => setTimeout(() => r("late"), 200))
+            }
+        });
+
+        await expect(hermes.dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+        const slowRes = await hermes.dispatch({ type: "slow" });
+        expect(slowRes).toMatchObject({ ok: false });
+        expect(slowRes.error).toMatch(/timed out \(50 ms\)/);
+    });
+
+    it("per-handler timeoutMs overrides the class-level timeoutMs", async () => {
+        // Class-level says 500ms; per-handler says 50ms — per-handler wins.
+        const hermes = new HermesHandler({
+            fast: {
+                timeoutMs: 50,
+                handler: () => new Promise((r) => setTimeout(() => r("done"), 200))
+            }
+        }, { timeoutMs: 500 });
+
+        const res = await hermes.dispatch({ type: "fast" });
+        expect(res).toMatchObject({ ok: false });
+        expect(res.error).toMatch(/timed out \(50 ms\)/);
+    });
+
+    it("handlers without per-config timeoutMs fall back to class default", async () => {
+        const hermes = new HermesHandler({
+            slow: () => new Promise((r) => setTimeout(() => r("done"), 200))
+        }, { timeoutMs: 50 });
+
+        const res = await hermes.dispatch({ type: "slow" });
+        expect(res).toMatchObject({ ok: false });
+        expect(res.error).toMatch(/timed out \(50 ms\)/);
+    });
+
+    it("timeoutMs: 0 on a per-handler config disables the timeout", async () => {
+        // Class-level would fire at 50ms; per-handler 0 disables.
+        const hermes = new HermesHandler({
+            patient: {
+                timeoutMs: 0,
+                handler: () => new Promise((r) => setTimeout(() => r("done"), 100))
+            }
+        }, { timeoutMs: 50 });
+
+        const res = await hermes.dispatch({ type: "patient" });
+        expect(res).toEqual({ ok: true, result: "done" });
+    });
+
+    it("register(type, config) accepts both bare functions and config objects", () => {
+        const hermes = new HermesHandler({});
+
+        hermes.register("ping", () => "pong");
+        hermes.register("slow", { timeoutMs: 30000, handler: () => "ok" });
+
+        expect(hermes.has("ping")).toBe(true);
+        expect(hermes.has("slow")).toBe(true);
+    });
+
+    it("rejects malformed handler entries with a clear error", () => {
+        expect(() => new HermesHandler({ bad: 42 })).toThrow(/must be a function or/);
+        expect(() => new HermesHandler({ noHandler: { timeoutMs: 100 } })).toThrow(/must be a function or/);
+        expect(() => new HermesHandler({ negative: { timeoutMs: -1, handler: () => {} } })).toThrow(/timeoutMs must be a non-negative/);
+    });
 });

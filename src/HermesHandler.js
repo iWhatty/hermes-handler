@@ -282,11 +282,39 @@ function withTimeout(fn, ms, onTimeout) {
 }
 
 
+/**
+ * @typedef {Object} HermesHandlerConfig
+ * @property {HermesHandlerFn} handler  The function called for matching messages.
+ * @property {number} [timeoutMs]  Per-handler timeout override (ms). Falls back to class-level `timeoutMs` if omitted. `0` disables timeout for this handler only.
+ */
+
+/**
+ * Normalize an entry in the handler map. Bare functions become
+ * `{ handler: fn }`. Object form is validated and passed through.
+ * @param {string} type
+ * @param {HermesHandlerFn | HermesHandlerConfig} entry
+ * @returns {HermesHandlerConfig}
+ */
+function normalizeHandlerEntry(type, entry) {
+    if (isFn(entry)) return { handler: entry };
+    if (entry && typeof entry === "object" && isFn(entry.handler)) {
+        if (entry.timeoutMs !== undefined && (typeof entry.timeoutMs !== "number" || !Number.isFinite(entry.timeoutMs) || entry.timeoutMs < 0)) {
+            throw new Error(`Handler config for ${type}: timeoutMs must be a non-negative finite number`);
+        }
+        return entry;
+    }
+    throw new Error(`Handler for ${type} must be a function or { handler, ...config } object`);
+}
+
+
 export class HermesHandler {
     /**
-     * @param {Record<string, HermesHandlerFn>} initialHandlers
+     * @param {Record<string, HermesHandlerFn | HermesHandlerConfig>} initialHandlers
+     *   Map of msg.type to either a bare handler function or a config object
+     *   `{ handler, timeoutMs? }`. Bare functions inherit the class-level
+     *   timeout; object form lets each handler declare its own budget.
      * @param {Object} [options]
-     * @param {number} [options.timeoutMs=5000]  max time a handler can take before auto-fail
+     * @param {number} [options.timeoutMs=5000]  default timeout (ms) for handlers without their own. Per-handler config overrides this.
      * @param {(msg: any, ctx: any) => any} [options.onUnknown]  override unknown-type response
      * @param {(err: any, msg: any, ctx: any) => any} [options.onError] override error response
      * @param {boolean} [options.ignoreUnknown=false]  let runtime listeners ignore messages without a registered handler
@@ -303,8 +331,11 @@ export class HermesHandler {
             logger = console
         } = options;
 
-        /** @type {Map<string, HermesHandlerFn>} */
-        this._handlers = new Map(Object.entries(initialHandlers));
+        /** @type {Map<string, HermesHandlerConfig>} */
+        this._handlers = new Map();
+        for (const [type, entry] of Object.entries(initialHandlers)) {
+            this._handlers.set(type, normalizeHandlerEntry(type, entry));
+        }
         this._timeoutMs = timeoutMs;
         this._onUnknown = onUnknown;
         this._onError = onError;
@@ -330,26 +361,24 @@ export class HermesHandler {
 
 
     /**
-     * Register (or overwrite) a handler for a given msg.type
+     * Register (or overwrite) a handler for a given msg.type. Accepts a
+     * bare function or a `{ handler, timeoutMs? }` config object.
      * @param {string} type
-     * @param {HermesHandlerFn} fn
+     * @param {HermesHandlerFn | HermesHandlerConfig} entry
      * @returns {void}
      */
-    register(type, fn) {
-        if (!isFn(fn)) {
-            throw new Error(`Handler for ${type} must be a function`);
-        }
-        this._handlers.set(type, fn);
+    register(type, entry) {
+        this._handlers.set(type, normalizeHandlerEntry(type, entry));
     }
 
     /**
-     * Register multiple handlers at once
-     * @param {Record<string, HermesHandlerFn>} map
+     * Register multiple handlers at once. Same per-entry shape as `register`.
+     * @param {Record<string, HermesHandlerFn | HermesHandlerConfig>} map
      * @returns {void}
      */
     registerMany(map) {
-        for (const [type, fn] of Object.entries(map ?? {})) {
-            this.register(type, fn);
+        for (const [type, entry] of Object.entries(map ?? {})) {
+            this.register(type, entry);
         }
     }
 
@@ -493,18 +522,22 @@ export class HermesHandler {
 
         };
 
-        const fn = this._handlers.get(type);
+        const entry = this._handlers.get(type);
 
-        if (!fn) {
+        if (!entry) {
             ctx.send(this._onUnknown(msg, ctx));
             return payloadToReturn;
         }
 
+        // Per-handler timeout overrides class-level. `0` disables for this
+        // handler. Undefined falls back to class default.
+        const effectiveTimeout = entry.timeoutMs !== undefined ? entry.timeoutMs : this._timeoutMs;
+
         try {
             const maybeReturn = await withTimeout(
-                () => fn(msg, ctx),
-                this._timeoutMs,
-                () => new Error(`Handler ${type} timed out (${this._timeoutMs} ms)`)
+                () => entry.handler(msg, ctx),
+                effectiveTimeout,
+                () => new Error(`Handler ${type} timed out (${effectiveTimeout} ms)`)
             );
 
             // Handler may either return a payload OR call ctx.send(payload)
