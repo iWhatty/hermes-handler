@@ -26,6 +26,8 @@
 //
 // The wire shape is the contract; the class is one implementation of it.
 
+import { parseWireResponse } from "./internal/envelope.js";
+
 /**
  * @typedef {Object} HermesClientRequest
  * @property {string} type
@@ -158,26 +160,7 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
 
             /** @param {any} msg */
             const onWireResponse = (msg) => {
-                if (msg.ok === true) {
-                    /** @type {HermesClientResponse<any>} */
-                    const r = { ok: true };
-                    if ("result" in msg) r.result = msg.result;
-                    if (msg.info !== undefined) r.info = msg.info;
-                    settle(r);
-                    return;
-                }
-                if (msg.ok === false && typeof msg.error === "string") {
-                    /** @type {HermesClientResponse<any>} */
-                    const r = { ok: false, error: msg.error };
-                    if (msg.info !== undefined) r.info = msg.info;
-                    settle(r);
-                    return;
-                }
-                settle({
-                    ok: false,
-                    error: "Hermes client: malformed response from server",
-                    info: { received: msg, requestId },
-                });
+                settle(/** @type {HermesClientResponse<any>} */ (parseWireResponse(msg, { requestId })));
             };
 
             pending.set(requestId, onWireResponse);

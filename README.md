@@ -116,6 +116,37 @@ All responses follow a strict envelope. Hermes never mutates `result`; any unexp
 
 Primitive return values are automatically normalized. `return "hello"` becomes `{ ok: true, result: "hello" }`. Malformed envelopes are coerced into valid error responses.
 
+### Handler return contract
+
+Every handler MUST settle the response by one of:
+
+1. **Return a value.** Primitives → `{ ok: true, result: value }`. Full envelopes (`{ ok, result?, error? }`) are passed through. Promises are awaited.
+2. **Call `ctx.send(payload)`.** Sync or async, before the handler's returned Promise settles. Subsequent `ctx.send` calls are ignored (idempotent).
+
+Returning `undefined` WITHOUT calling `ctx.send` settles the dispatch with `{ ok: false, error: "Handler ${type} returned no response" }` — this is treated as a handler bug, not a valid envelope.
+
+```js
+// ✅ return-value style
+{ ping: () => 'pong' }
+
+// ✅ full-envelope return
+{ ping: () => ({ ok: true, result: 'pong' }) }
+
+// ✅ ctx.send style (sync)
+{ ping: (_msg, ctx) => { ctx.send('pong'); } }
+
+// ✅ ctx.send style (async)
+{ slow: async (_msg, ctx) => {
+    const data = await fetchSomething();
+    ctx.send({ ok: true, result: data });
+  } }
+
+// ❌ returns undefined, never sends — settles with "returned no response" error
+{ bad: () => { doSideEffect(); } }
+```
+
+If both ctx.send and a return value are present, ctx.send wins (it settles first).
+
 ---
 
 ## Notes

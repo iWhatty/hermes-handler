@@ -30,6 +30,8 @@
  *   Useful for tests.
  */
 
+import { defineTransport } from "./_base.js";
+
 /**
  * @param {ChromeRuntimeTransportOptions} [opts]
  */
@@ -87,5 +89,5 @@ export function chromeRuntimeTransport(opts = {}) {
         return () => handlers.delete(handler);
     };
 
-    return { send, subscribe };
+    return defineTransport("chromeRuntimeTransport", { send, subscribe });
 }

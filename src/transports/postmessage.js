@@ -45,6 +45,8 @@
  *   `inbound`.
  */
 
+import { defineTransport } from "./_base.js";
+
 /**
  * @param {any} target  Window, MessagePort, Worker, or anything with postMessage + addEventListener.
  * @param {PostMessageTransportOptions} [opts]
@@ -102,5 +104,5 @@ export function postMessageTransport(target, opts = {}) {
         return () => target.removeEventListener("message", listener);
     };
 
-    return { send, subscribe };
+    return defineTransport("postMessageTransport", { send, subscribe });
 }

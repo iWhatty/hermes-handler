@@ -20,6 +20,8 @@
  *   for tests.
  */
 
+import { defineTransport } from "./_base.js";
+
 /**
  * @param {string | BroadcastChannel} channelOrName
  * @param {BroadcastChannelTransportOptions} [opts]
@@ -47,5 +49,6 @@ export function broadcastChannelTransport(channelOrName, opts = {}) {
         return () => channel.removeEventListener("message", listener);
     };
 
-    return { send, subscribe, channel };
+    const transport = defineTransport("broadcastChannelTransport", { send, subscribe });
+    return { ...transport, channel };
 }

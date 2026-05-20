@@ -1,9 +1,18 @@
 // src/HermesHandler.js
-
+//
 // ------------------------------------------------------------
 // HermesHandler  — universal message router / gatekeeper
 // ------------------------------------------------------------
+//
+// Routing logic lives here. Wire-envelope normalization, timeout
+// primitives, and error stringification have moved to
+// `src/internal/` so the client (`src/client.js`) shares the same
+// contract. Refactor history: helpers were inlined here through
+// 1.0.0; 1.0.1 extracted the shared pieces.
 
+import { normalizePayload, freezeNormalized } from "./internal/envelope.js";
+import { withTimeout } from "./internal/timeout.js";
+import { toErrorString } from "./internal/errors.js";
 
 
 /**
@@ -47,6 +56,20 @@
 
 
 /**
+ * Handler-return contract:
+ *
+ *   A handler MUST settle the response by one of:
+ *     1. Returning a value (will be normalized — primitives become
+ *        `{ ok: true, result: value }`; full `{ ok, result?, error? }`
+ *        envelopes are accepted verbatim).
+ *     2. Calling `ctx.send(payload)` synchronously OR asynchronously
+ *        before its returned Promise settles.
+ *
+ *   Returning `undefined` WITHOUT calling `ctx.send` settles the
+ *   dispatch with `{ ok: false, error: "Handler ${type} returned no
+ *   response" }`. This is treated as a handler bug — explicit settle
+ *   is part of the contract.
+ *
  * @callback HermesHandlerFn
  * @param {HermesMessage} msg
  * @param {HermesContext} ctx
@@ -73,7 +96,7 @@
 
 
 /* ------------------------------------------------------------
- * Internal helpers
+ * Local helpers (kept here because they're routing-specific)
  * ---------------------------------------------------------- */
 
 /**
@@ -85,225 +108,6 @@
 function isFn(value) {
     return typeof value === "function";
 }
-
-/**
- * Convert unknown error-like values into a readable string.
- *
- * @param {unknown} err
- * @returns {string}
- */
-function toErrorString(err) {
-    if (err instanceof Error) {
-        return err.message || String(err);
-    }
-
-    if (err && typeof err === "object" && "message" in err) {
-        const msg = /** @type {{ message?: unknown }} */ (err).message;
-        if (typeof msg === "string") return msg;
-    }
-
-    return String(err);
-}
-
-
-// requestId is part of the canonical envelope spec (see HermesResponse
-// typedef) so it survives normalization instead of being shunted into
-// info.handlerInfo. Handlers may set it explicitly; _dispatch also
-// auto-echoes it from request → response for manual-transport correlation.
-const HERMES_KEYS = new Set(["ok", "result", "error", "info", "requestId"]);
-const HERMES_KEYS_SUCCESS = new Set(["ok", "result", "info", "requestId"]);
-const HERMES_KEYS_ERROR = new Set(["ok", "error", "info", "requestId"]);
-
-// Internal marker so normalizePayload is idempotent across middleware-chain
-// normalization + ctx.send re-normalization. Symbol so it never collides
-// with consumer-defined keys; defineProperty with enumerable:false keeps
-// it out of Object.keys / JSON.stringify / for-in.
-const NORMALIZED_MARKER = Symbol("hermes:normalized");
-
-/**
- * Collect non-canonical fields into an `info` bag.
- *
- * @param {any} payload
- * @param {ReadonlySet<string> | readonly string[]} skipKeys
- * @returns {Record<string, any> | null}
- */
-function collectInfo(payload, skipKeys) {
-    const skip = skipKeys instanceof Set ? skipKeys : new Set(skipKeys);
-
-    /** @type {Record<string, any> | null} */
-    let info = null;
-
-    /** @param {string} k @param {any} v */
-    const addInfo = (k, v) => {
-        if (v === undefined) return;
-        if (info === null) info = {};
-        info[k] = v;
-    };
-
-    if ("info" in payload) addInfo("handlerInfo", payload.info);
-
-    for (const [k, v] of Object.entries(payload)) {
-        if (skip.has(k)) continue;
-        addInfo(k, v);
-    }
-
-    return info;
-}
-
-
-/**
- * Normalize any handler return value into a HermesResponse.
- *
- * Goals:
- *  - Always return a deterministic envelope: {ok:true,result?} or {ok:false,error,info?}
- *  - Never silently drop useful info: preserve conflicting/extra fields in info and warn
- *
- * @param {any} payload
- * @param {HermesLogger|null} logger
- * @returns {{ ok: true, result?: any, info?: any, requestId?: string } | { ok: false, error: string, info?: any, requestId?: string }}
- */
-function normalizePayload(payload, logger = null) {
-    // Idempotency: middleware pipelines normalize at handlerInvocation so
-    // mw chains see canonical envelopes, then ctx.send normalizes again.
-    // Without this marker, the second pass would re-shunt `info` into
-    // `info.handlerInfo` recursively. We tag the canonical output and
-    // pass it through on subsequent calls.
-    if (payload && typeof payload === "object" && payload[NORMALIZED_MARKER] === true) {
-        return payload;
-    }
-    if (!payload || typeof payload !== "object" || !("ok" in payload)) {
-        /** @type {{ ok: true, result?: any }} */
-        const out = { ok: true, result: payload };
-        Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
-        return out;
-    }
-
-    if (typeof payload.ok !== "boolean") {
-        const out = { ok: false, error: "Invalid response: 'ok' must be boolean" };
-        Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
-        return out;
-    }
-
-    if (payload.ok === false) {
-        if (typeof payload.error !== "string") {
-            const out = { ok: false, error: "Invalid response: missing 'error' string" };
-            Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
-            return out;
-        }
-
-        // Extras include accidental result + any unexpected keys + handlerInfo
-        const info = collectInfo(payload, HERMES_KEYS_ERROR) /* includes result + others */;
-
-        /** @type {{ ok: false, error: string, info?: any, requestId?: string }} */
-        const errOut = { ok: false, error: payload.error };
-        if ("requestId" in payload) errOut.requestId = payload.requestId;
-        if (info) {
-            logger?.warn?.("[Hermes] ok:false response contained extra fields; preserved in info", {
-                extraKeys: Object.keys(info)
-            });
-            errOut.info = info;
-        }
-        Object.defineProperty(errOut, NORMALIZED_MARKER, { value: true, enumerable: false });
-        return errOut;
-    }
-
-    /** @type {{ ok: true, result?: any, info?: any, requestId?: string }} */
-    const out = { ok: true };
-    if ("result" in payload) out.result = payload.result;
-    if ("requestId" in payload) out.requestId = payload.requestId;
-
-    // Extras include accidental error + any unexpected keys + handlerInfo
-    const info = collectInfo(payload, HERMES_KEYS_SUCCESS) /* includes error + others */;
-
-    if (info) {
-        logger?.warn?.("[Hermes] ok:true response contained extra fields; preserved in info", {
-            extraKeys: Object.keys(info)
-        });
-        out.info = info;
-    }
-
-    Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
-    return out;
-}
-
-/**
- * Normalize, optionally stamp requestId, then shallow-freeze. The
- * requestId is echoed from request → response so manual transports
- * (postMessage, BroadcastChannel, MessageChannel, …) get correlation
- * for free; chrome.runtime via `getListener()` doesn't need it because
- * the runtime correlates by sendResponse callback.
- *
- * If the handler already set `requestId` on the response (rare), the
- * handler's value wins.
- *
- * @param {any} payload
- * @param {HermesLogger|null} logger
- * @param {string|undefined} [requestId]
- */
-function freezeNormalized(payload, logger = null, requestId = undefined) {
-    const normalized = normalizePayload(payload, logger);
-    if (
-        normalized &&
-        typeof normalized === "object" &&
-        requestId !== undefined &&
-        !("requestId" in normalized)
-    ) {
-        normalized.requestId = requestId;
-    }
-    return normalized && typeof normalized === "object"
-        ? Object.freeze(normalized)
-        : normalized;
-}
-
-
-/**
- * @template T
- * @param {() => T | Promise<T>} fn
- * @param {number} ms
- * @param {() => any} onTimeout
- * @returns {Promise<T>}
- */
-function withTimeout(fn, ms, onTimeout) {
-    if (!Number.isFinite(ms) || ms <= 0) {
-        return Promise.resolve().then(fn);
-    }
-
-    const makeTimeoutError = () => {
-        try {
-            return onTimeout();
-        } catch (e) {
-            return e;
-        }
-    };
-
-    return new Promise((resolve, reject) => {
-
-        /** @type {ReturnType<typeof setTimeout>} */
-        let timerId;
-
-        const cleanup = () => clearTimeout(timerId);
-
-        /** @param {T} value */
-        const resolveWithCleanup = (value) => {
-            cleanup();
-            resolve(value);
-        };
-
-        /** @param {any} err */
-        const rejectWithCleanup = (err) => {
-            cleanup();
-            reject(err);
-        };
-
-        timerId = setTimeout(() => rejectWithCleanup(makeTimeoutError()), ms);
-
-        Promise.resolve()
-            .then(fn)
-            .then(resolveWithCleanup)
-            .catch(rejectWithCleanup);
-    });
-}
-
 
 /**
  * @typedef {Object} HermesHandlerConfig
