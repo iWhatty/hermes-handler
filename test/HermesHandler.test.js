@@ -278,4 +278,117 @@ describe("HermesHandler", () => {
         expect(() => new HermesHandler({ noHandler: { timeoutMs: 100 } })).toThrow(/must be a function or/);
         expect(() => new HermesHandler({ negative: { timeoutMs: -1, handler: () => {} } })).toThrow(/timeoutMs must be a non-negative/);
     });
+
+    // ------------------------------------------------------------
+    // Middleware pipeline (.use)
+    // ------------------------------------------------------------
+
+    it(".use() registers a middleware that wraps the handler", async () => {
+        const seen = [];
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (msg, _ctx, next) => {
+            seen.push(`before:${msg.type}`);
+            const res = await next();
+            seen.push(`after:${msg.type}:${res.ok}`);
+            return res;
+        });
+
+        const res = await hermes.dispatch({ type: "ping" });
+        expect(res).toEqual({ ok: true, result: "pong" });
+        expect(seen).toEqual(["before:ping", "after:ping:true"]);
+    });
+
+    it("middlewares run in registration order (outer wraps inner)", async () => {
+        const order = [];
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (_m, _c, next) => { order.push("A in"); const r = await next(); order.push("A out"); return r; });
+        hermes.use(async (_m, _c, next) => { order.push("B in"); const r = await next(); order.push("B out"); return r; });
+
+        await hermes.dispatch({ type: "ping" });
+        expect(order).toEqual(["A in", "B in", "B out", "A out"]);
+    });
+
+    it("middleware can short-circuit by returning without calling next()", async () => {
+        let innerCalled = false;
+        const hermes = new HermesHandler({
+            ping: () => { innerCalled = true; return "pong"; }
+        });
+        hermes.use(async () => ({ ok: false, error: "blocked by middleware" }));
+
+        const res = await hermes.dispatch({ type: "ping" });
+        expect(res).toMatchObject({ ok: false, error: "blocked by middleware" });
+        expect(innerCalled).toBe(false);
+    });
+
+    it("middleware can transform the response after next()", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (_m, _c, next) => {
+            const res = await next();
+            if (res.ok) return { ok: true, result: `wrapped:${res.result}` };
+            return res;
+        });
+
+        const res = await hermes.dispatch({ type: "ping" });
+        expect(res).toEqual({ ok: true, result: "wrapped:pong" });
+    });
+
+    it("middleware throws become onError envelopes", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" }, { logger: null });
+        hermes.use(() => { throw new Error("middleware exploded"); });
+
+        const res = await hermes.dispatch({ type: "ping" });
+        expect(res).toMatchObject({ ok: false });
+        expect(res.error).toMatch(/middleware exploded/);
+    });
+
+    it("middleware sees ctx.requestId echoed from the request", async () => {
+        let seenRequestId = null;
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (_m, ctx, next) => {
+            seenRequestId = ctx.requestId;
+            return next();
+        });
+
+        await hermes.dispatch({ type: "ping", requestId: "r-42" });
+        expect(seenRequestId).toBe("r-42");
+    });
+
+    it("middleware can read ctx.signal for cooperative cancellation in long ops", async () => {
+        let saw = false;
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (_m, ctx, next) => {
+            saw = ctx.signal instanceof AbortSignal;
+            return next();
+        });
+        await hermes.dispatch({ type: "ping" });
+        expect(saw).toBe(true);
+    });
+
+    it("middleware can guard unknown types before they reach onUnknown", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        hermes.use(async (msg, _c, next) => {
+            if (msg.type.startsWith("admin:")) {
+                return { ok: false, error: "admin: forbidden in this context" };
+            }
+            return next();
+        });
+
+        const r1 = await hermes.dispatch({ type: "admin:wipe" });
+        expect(r1).toMatchObject({ ok: false, error: "admin: forbidden in this context" });
+
+        const r2 = await hermes.dispatch({ type: "ping" });
+        expect(r2).toEqual({ ok: true, result: "pong" });
+    });
+
+    it(".use() returns `this` for chaining", () => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+        const ret = hermes.use(async (_m, _c, next) => next()).use(async (_m, _c, next) => next());
+        expect(ret).toBe(hermes);
+    });
+
+    it(".use() rejects non-function args", () => {
+        const hermes = new HermesHandler({});
+        expect(() => hermes.use(null)).toThrow(/must be a function/);
+        expect(() => hermes.use(42)).toThrow(/must be a function/);
+    });
 });

@@ -114,6 +114,12 @@ const HERMES_KEYS = new Set(["ok", "result", "error", "info", "requestId"]);
 const HERMES_KEYS_SUCCESS = new Set(["ok", "result", "info", "requestId"]);
 const HERMES_KEYS_ERROR = new Set(["ok", "error", "info", "requestId"]);
 
+// Internal marker so normalizePayload is idempotent across middleware-chain
+// normalization + ctx.send re-normalization. Symbol so it never collides
+// with consumer-defined keys; defineProperty with enumerable:false keeps
+// it out of Object.keys / JSON.stringify / for-in.
+const NORMALIZED_MARKER = Symbol("hermes:normalized");
+
 /**
  * Collect non-canonical fields into an `info` bag.
  *
@@ -157,17 +163,31 @@ function collectInfo(payload, skipKeys) {
  * @returns {{ ok: true, result?: any, info?: any, requestId?: string } | { ok: false, error: string, info?: any, requestId?: string }}
  */
 function normalizePayload(payload, logger = null) {
+    // Idempotency: middleware pipelines normalize at handlerInvocation so
+    // mw chains see canonical envelopes, then ctx.send normalizes again.
+    // Without this marker, the second pass would re-shunt `info` into
+    // `info.handlerInfo` recursively. We tag the canonical output and
+    // pass it through on subsequent calls.
+    if (payload && typeof payload === "object" && payload[NORMALIZED_MARKER] === true) {
+        return payload;
+    }
     if (!payload || typeof payload !== "object" || !("ok" in payload)) {
-        return { ok: true, result: payload };
+        const out = { ok: true, result: payload };
+        Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
+        return out;
     }
 
     if (typeof payload.ok !== "boolean") {
-        return { ok: false, error: "Invalid response: 'ok' must be boolean" };
+        const out = { ok: false, error: "Invalid response: 'ok' must be boolean" };
+        Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
+        return out;
     }
 
     if (payload.ok === false) {
         if (typeof payload.error !== "string") {
-            return { ok: false, error: "Invalid response: missing 'error' string" };
+            const out = { ok: false, error: "Invalid response: missing 'error' string" };
+            Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
+            return out;
         }
 
         // Extras include accidental result + any unexpected keys + handlerInfo
@@ -182,6 +202,7 @@ function normalizePayload(payload, logger = null) {
             });
             errOut.info = info;
         }
+        Object.defineProperty(errOut, NORMALIZED_MARKER, { value: true, enumerable: false });
         return errOut;
     }
 
@@ -200,6 +221,7 @@ function normalizePayload(payload, logger = null) {
         out.info = info;
     }
 
+    Object.defineProperty(out, NORMALIZED_MARKER, { value: true, enumerable: false });
     return out;
 }
 
@@ -342,8 +364,49 @@ export class HermesHandler {
         this._ignoreUnknown = ignoreUnknown === true;
         this._shouldHandle = isFn(shouldHandle) ? shouldHandle : null;
 
+        /** @type {Array<(msg: any, ctx: any, next: () => Promise<any>) => any>} */
+        this._middleware = [];
+
         /** @type {HermesLogger|null} */
         this._logger = logger;
+    }
+
+
+    /**
+     * Register a middleware. Each middleware is called with
+     * `(msg, ctx, next)` for every dispatched message, in registration
+     * order. The middleware MUST either:
+     *
+     *   - return a response envelope (short-circuiting `next()`), OR
+     *   - call `await next()` to invoke the rest of the chain (terminating
+     *     in the actual handler) and return its result, optionally
+     *     transformed
+     *
+     * Middlewares can: log, time, authenticate, rate-limit, retry,
+     * transform input/output, emit metrics, etc. Throws are caught and
+     * become error envelopes (same as handler throws).
+     *
+     * Order matters: middleware registered first wraps middleware
+     * registered later (outermost first). The handler runs last.
+     *
+     * ```js
+     * hermes.use(async (msg, ctx, next) => {
+     *   const start = performance.now();
+     *   const res = await next();
+     *   ctx.logger?.info?.(`[hermes] ${msg.type} ${(performance.now() - start).toFixed(1)}ms ok=${res.ok}`);
+     *   return res;
+     * });
+     * ```
+     *
+     * @param {(msg: any, ctx: any, next: () => Promise<any>) => any} fn
+     * @returns {this}
+     */
+    use(fn) {
+        if (!isFn(fn)) {
+            throw new TypeError("HermesHandler.use: middleware must be a function (msg, ctx, next) => any");
+        }
+        this._middleware.push(fn);
+        return this;
     }
 
 
@@ -522,34 +585,69 @@ export class HermesHandler {
 
         };
 
-        const entry = this._handlers.get(type);
+        // Terminal handler invocation: looks up the handler, runs it with
+        // the appropriate per-handler timeout, returns a NORMALIZED response
+        // envelope so middlewares see canonical `{ ok, result?, error?, info?,
+        // requestId? }` from `next()`. ctx.send is honored if the handler
+        // used it. Throws become onError envelopes.
+        const handlerInvocation = async () => {
+            const entry = this._handlers.get(type);
+            if (!entry) return normalizePayload(this._onUnknown(msg, ctx), this._logger);
 
-        if (!entry) {
-            ctx.send(this._onUnknown(msg, ctx));
-            return payloadToReturn;
+            // Per-handler timeout overrides class-level. `0` disables for this
+            // handler. Undefined falls back to class default.
+            const effectiveTimeout = entry.timeoutMs !== undefined ? entry.timeoutMs : this._timeoutMs;
+
+            try {
+                const maybeReturn = await withTimeout(
+                    () => entry.handler(msg, ctx),
+                    effectiveTimeout,
+                    () => new Error(`Handler ${type} timed out (${effectiveTimeout} ms)`)
+                );
+                if (responded) return payloadToReturn;  // handler used ctx.send
+                if (maybeReturn === undefined) {
+                    return { ok: false, error: `Handler ${type} returned no response` };
+                }
+                return normalizePayload(maybeReturn, this._logger);
+            } catch (err) {
+                this._logger?.error?.(`[Hermes] Handler error for ${type}:`, err);
+                if (responded) return payloadToReturn;
+                return normalizePayload(this._onError(err, msg, ctx), this._logger);
+            }
+        };
+
+        // Compose middleware chain: middleware registered first wraps
+        // middleware registered later, with handlerInvocation as the
+        // innermost call. Each middleware is `(msg, ctx, next) => response`.
+        let chain = handlerInvocation;
+        for (let i = this._middleware.length - 1; i >= 0; i--) {
+            const mw = this._middleware[i];
+            const inner = chain;
+            chain = async () => {
+                try {
+                    return await mw(msg, ctx, inner);
+                } catch (err) {
+                    this._logger?.error?.(`[Hermes] Middleware error for ${type}:`, err);
+                    return this._onError(err, msg, ctx);
+                }
+            };
         }
 
-        // Per-handler timeout overrides class-level. `0` disables for this
-        // handler. Undefined falls back to class default.
-        const effectiveTimeout = entry.timeoutMs !== undefined ? entry.timeoutMs : this._timeoutMs;
-
         try {
-            const maybeReturn = await withTimeout(
-                () => entry.handler(msg, ctx),
-                effectiveTimeout,
-                () => new Error(`Handler ${type} timed out (${effectiveTimeout} ms)`)
-            );
-
-            // Handler may either return a payload OR call ctx.send(payload)
-            if (!responded && maybeReturn !== undefined) {
-                ctx.send(maybeReturn);
+            const chainResponse = await chain();
+            // If the chain returned a value (typical), normalize+send it.
+            // If the handler used ctx.send (responded=true) without the
+            // chain returning, payloadToReturn already holds it.
+            if (!responded && chainResponse !== undefined) {
+                ctx.send(chainResponse);
             }
-
             if (!responded) {
-                ctx.send({ ok: false, error: `Handler ${type} returned no response` });
+                ctx.send({ ok: false, error: `Chain for ${type} returned no response` });
             }
         } catch (err) {
-            this._logger?.error?.(`[Hermes] Handler error for ${type}:`, err);
+            // Defensive: chain shouldn't throw (middleware/handler errors
+            // are caught above), but if it does we want a clean envelope.
+            this._logger?.error?.(`[Hermes] Dispatch chain error for ${type}:`, err);
             if (!responded) {
                 ctx.send(this._onError(err, msg, ctx));
             }
