@@ -139,9 +139,14 @@ return { ok: true, sourceCandidates };
 
 return { ok: true, sourceCandidates, info: { timingMs: 12 } };
 // -> { ok: true, result: { sourceCandidates }, info: { timingMs: 12 } }
+
+return { ok: true, error: "not actually failed" };
+// -> { ok: true, info: { error: "not actually failed" } }
 ```
 
-Error envelopes stay strict: `ok:false` must include a string `error`. Extra fields on errors are moved into `info`; if the handler also provided `info`, Hermes preserves it under `info.handlerInfo` when combining it with those extras. Malformed envelopes are coerced into valid error responses.
+Fields reserved for the opposite branch, such as `error` on `ok:true`, are treated as diagnostics instead of success payload.
+
+Error envelopes stay strict: `ok:false` must include a string `error`. Canonical `info` is preserved as `info`. Extra fields on errors are moved into `info`; if the handler also provided `info`, Hermes preserves it under `info.handlerInfo` when combining it with those extras. Malformed envelopes are coerced into valid error responses.
 
 ### Handler return contract
 

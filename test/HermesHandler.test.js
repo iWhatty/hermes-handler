@@ -87,6 +87,37 @@ describe("HermesHandler", () => {
         });
     });
 
+    it("treats error on ok:true shorthand as diagnostics instead of result payload", async () => {
+        const hermes = new HermesHandler({
+            odd: () => ({ ok: true, error: "not actually failed" })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "odd" });
+
+        expect(res).toEqual({
+            ok: true,
+            info: { error: "not actually failed" }
+        });
+    });
+
+    it("keeps ok:false handler info canonical when there are no extras", async () => {
+        const hermes = new HermesHandler({
+            fail: () => ({
+                ok: false,
+                error: "nope",
+                info: { timingMs: 12 }
+            })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "fail" });
+
+        expect(res).toEqual({
+            ok: false,
+            error: "nope",
+            info: { timingMs: 12 }
+        });
+    });
+
     it("keeps ok:false strict and preserves handler info under handlerInfo when extras exist", async () => {
         const hermes = new HermesHandler({
             fail: () => ({

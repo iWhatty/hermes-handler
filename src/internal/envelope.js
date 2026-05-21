@@ -81,20 +81,35 @@ function collectExtraFields(payload, skipKeys) {
 
 /**
  * Collect non-canonical fields from an error payload into an `info` bag.
- * Handler-set `info` becomes `info.handlerInfo` so router-side fields
- * stay distinguishable from handler-supplied ones.
+ * Handler-set `info` stays canonical unless extras force a combined bag.
  *
  * @param {any} payload
- * @returns {Record<string, any> | null}
+ * @returns {{ info: any, extraKeys: string[] }}
  */
 function collectErrorInfo(payload) {
     const extras = collectExtraFields(payload, HERMES_KEYS_ERROR);
+    const extraKeys = Object.keys(extras ?? {});
 
-    if (!("info" in payload) || payload.info === undefined) return extras;
+    if (extraKeys.length === 0) {
+        return {
+            info: "info" in payload ? payload.info : undefined,
+            extraKeys
+        };
+    }
+
+    if ("info" in payload && payload.info !== undefined) {
+        return {
+            info: {
+                handlerInfo: payload.info,
+                ...extras
+            },
+            extraKeys
+        };
+    }
 
     return {
-        handlerInfo: payload.info,
-        ...(extras ?? {})
+        info: extras,
+        extraKeys
     };
 }
 
@@ -120,6 +135,35 @@ function collectSuccessInfo(payload) {
     }
 
     return extras;
+}
+
+/**
+ * Collect diagnostics for success shorthand payloads. Non-reserved fields become
+ * `result`; reserved fields from the wrong envelope branch stay diagnostic.
+ *
+ * @param {any} payload
+ * @returns {any}
+ */
+function collectSuccessShorthandInfo(payload) {
+    /** @type {Record<string, any> | null} */
+    let diagnostics = null;
+
+    if ("error" in payload && payload.error !== undefined) {
+        diagnostics = { error: payload.error };
+    }
+
+    if (!diagnostics) {
+        return "info" in payload ? payload.info : undefined;
+    }
+
+    if ("info" in payload && payload.info !== undefined) {
+        return {
+            handlerInfo: payload.info,
+            ...diagnostics
+        };
+    }
+
+    return diagnostics;
 }
 
 // ============================================================================
@@ -168,15 +212,17 @@ export function normalizePayload(payload, logger = null) {
             return out;
         }
 
-        const info = collectErrorInfo(payload);
+        const { info, extraKeys } = collectErrorInfo(payload);
 
         /** @type {{ ok: false, error: string, info?: any, requestId?: string }} */
         const errOut = { ok: false, error: payload.error };
         if ("requestId" in payload) errOut.requestId = payload.requestId;
-        if (info) {
-            logger?.warn?.("[Hermes] ok:false response contained extra fields; preserved in info", {
-                extraKeys: Object.keys(info)
-            });
+        if (info !== undefined) {
+            if (extraKeys.length > 0) {
+                logger?.warn?.("[Hermes] ok:false response contained extra fields; preserved in info", {
+                    extraKeys
+                });
+            }
             errOut.info = info;
         }
         markNormalized(errOut);
@@ -206,12 +252,17 @@ export function normalizePayload(payload, logger = null) {
         return out;
     }
 
-    const result = collectExtraFields(payload, HERMES_KEYS_SUCCESS);
+    const result = collectExtraFields(payload, HERMES_KEYS);
     if (result) {
         out.result = result;
     }
-    if ("info" in payload && payload.info !== undefined) {
-        out.info = payload.info;
+
+    const info = collectSuccessShorthandInfo(payload);
+    if (info !== undefined) {
+        if ("error" in payload && payload.error !== undefined) {
+            logger?.warn?.("[Hermes] ok:true response contained error field; preserved in info");
+        }
+        out.info = info;
     }
 
     markNormalized(out);

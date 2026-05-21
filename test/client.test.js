@@ -42,10 +42,8 @@ describe("createHermesClient", () => {
     });
 
     // The next two tests exercise the *client* in isolation against a
-    // controlled wire emission. The server's `info` normalization (wraps
-    // handler-provided info as info.handlerInfo to disambiguate from
-    // server-collected extras) is server behavior; the client just
-    // forwards whatever envelope the wire carries.
+    // controlled wire emission. Server-side normalization is covered in the
+    // router tests; the client just forwards whatever envelope the wire carries.
 
     it("preserves info on a success envelope", async () => {
         const subscribers = new Set();
@@ -85,10 +83,7 @@ describe("createHermesClient", () => {
         expect(res).toEqual({ ok: false, error: "kaboom", info: { code: 7 } });
     });
 
-    it("integrates cleanly with a real HermesHandler server (info wrapped as handlerInfo)", async () => {
-        // End-to-end sanity check: real server, real client. Documents that
-        // the server reshapes handler-emitted info into info.handlerInfo —
-        // future maintainers should expect this when wiring the two together.
+    it("integrates cleanly with a real HermesHandler server preserving canonical error info", async () => {
         const { send, subscribe } = loopback({
             boom: () => ({ ok: false, error: "kaboom", info: { code: 7 } }),
         });
@@ -96,9 +91,7 @@ describe("createHermesClient", () => {
 
         const res = await dispatch({ type: "boom" });
 
-        expect(res.ok).toBe(false);
-        expect(res.error).toBe("kaboom");
-        expect(res.info?.handlerInfo).toEqual({ code: 7 });
+        expect(res).toEqual({ ok: false, error: "kaboom", info: { code: 7 } });
     });
 
     it("filters responses by requestId — concurrent calls don't cross-contaminate", async () => {
