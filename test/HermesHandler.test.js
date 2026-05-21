@@ -349,7 +349,7 @@ describe("HermesHandler", () => {
                 timeoutMs: 50,
                 handler: () => new Promise((r) => setTimeout(() => r("late"), 200))
             }
-        });
+        }, { logger: null });
 
         await expect(hermes.dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
         const slowRes = await hermes.dispatch({ type: "slow" });
@@ -364,7 +364,7 @@ describe("HermesHandler", () => {
                 timeoutMs: 50,
                 handler: () => new Promise((r) => setTimeout(() => r("done"), 200))
             }
-        }, { timeoutMs: 500 });
+        }, { timeoutMs: 500, logger: null });
 
         const res = await hermes.dispatch({ type: "fast" });
         expect(res).toMatchObject({ ok: false });
@@ -374,7 +374,7 @@ describe("HermesHandler", () => {
     it("handlers without per-config timeoutMs fall back to class default", async () => {
         const hermes = new HermesHandler({
             slow: () => new Promise((r) => setTimeout(() => r("done"), 200))
-        }, { timeoutMs: 50 });
+        }, { timeoutMs: 50, logger: null });
 
         const res = await hermes.dispatch({ type: "slow" });
         expect(res).toMatchObject({ ok: false });
