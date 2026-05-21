@@ -55,39 +55,71 @@ function markNormalized(obj) {
 }
 
 // ============================================================================
-// Info collection: shunt non-canonical fields into an `info` bag
+// Field collection: shunt non-canonical fields into `info` or `result`
 // ============================================================================
 
 /**
- * Collect non-canonical fields from a payload into an `info` bag.
- * Handler-set `info` becomes `info.handlerInfo` so router-side fields
- * stay distinguishable from handler-supplied ones.
+ * Collect fields from a payload that are not part of the given canonical key set.
  *
  * @param {any} payload
  * @param {ReadonlySet<string> | readonly string[]} skipKeys
  * @returns {Record<string, any> | null}
  */
-function collectInfo(payload, skipKeys) {
+function collectExtraFields(payload, skipKeys) {
     const skip = skipKeys instanceof Set ? skipKeys : new Set(skipKeys);
 
-    /** @type {Record<string, any> | null} */
-    let info = null;
-
-    /** @param {string} k @param {any} v */
-    const addInfo = (k, v) => {
-        if (v === undefined) return;
-        if (info === null) info = {};
-        info[k] = v;
-    };
-
-    if ("info" in payload) addInfo("handlerInfo", payload.info);
+    /** @type {Record<string, any>} */
+    const extras = {};
 
     for (const [k, v] of Object.entries(payload)) {
         if (skip.has(k)) continue;
-        addInfo(k, v);
+        if (v !== undefined) extras[k] = v;
     }
 
-    return info;
+    return Object.keys(extras).length > 0 ? extras : null;
+}
+
+/**
+ * Collect non-canonical fields from an error payload into an `info` bag.
+ * Handler-set `info` becomes `info.handlerInfo` so router-side fields
+ * stay distinguishable from handler-supplied ones.
+ *
+ * @param {any} payload
+ * @returns {Record<string, any> | null}
+ */
+function collectErrorInfo(payload) {
+    const extras = collectExtraFields(payload, HERMES_KEYS_ERROR);
+
+    if (!("info" in payload) || payload.info === undefined) return extras;
+
+    return {
+        handlerInfo: payload.info,
+        ...(extras ?? {})
+    };
+}
+
+/**
+ * Collect non-canonical fields from an explicit-result success payload into
+ * `info`. Handler `info` stays canonical unless extras force a combined bag.
+ *
+ * @param {any} payload
+ * @returns {any}
+ */
+function collectSuccessInfo(payload) {
+    const extras = collectExtraFields(payload, HERMES_KEYS_SUCCESS);
+
+    if (!extras) {
+        return "info" in payload ? payload.info : undefined;
+    }
+
+    if ("info" in payload && payload.info !== undefined) {
+        return {
+            handlerInfo: payload.info,
+            ...extras
+        };
+    }
+
+    return extras;
 }
 
 // ============================================================================
@@ -100,7 +132,7 @@ function collectInfo(payload, skipKeys) {
  * Goals:
  *  - Accept primitives, partial envelopes, and well-formed envelopes
  *  - Always emit a deterministic `{ ok: true, result?, ... } | { ok: false, error, ... }`
- *  - Preserve handler-set extra fields under `info.handlerInfo` instead of dropping them
+ *  - Preserve handler-set diagnostics under `info` instead of dropping them
  *  - Idempotent: calling twice produces the same output (via NORMALIZED_MARKER)
  *
  * @param {any} payload
@@ -136,7 +168,7 @@ export function normalizePayload(payload, logger = null) {
             return out;
         }
 
-        const info = collectInfo(payload, HERMES_KEYS_ERROR);
+        const info = collectErrorInfo(payload);
 
         /** @type {{ ok: false, error: string, info?: any, requestId?: string }} */
         const errOut = { ok: false, error: payload.error };
@@ -154,15 +186,32 @@ export function normalizePayload(payload, logger = null) {
     // Success envelope.
     /** @type {{ ok: true, result?: any, info?: any, requestId?: string }} */
     const out = { ok: true };
-    if ("result" in payload) out.result = payload.result;
     if ("requestId" in payload) out.requestId = payload.requestId;
 
-    const info = collectInfo(payload, HERMES_KEYS_SUCCESS);
-    if (info) {
-        logger?.warn?.("[Hermes] ok:true response contained extra fields; preserved in info", {
-            extraKeys: Object.keys(info)
-        });
-        out.info = info;
+    if ("result" in payload) {
+        out.result = payload.result;
+
+        const info = collectSuccessInfo(payload);
+        if (info !== undefined) {
+            const extraKeys = Object.keys(collectExtraFields(payload, HERMES_KEYS_SUCCESS) ?? {});
+            if (extraKeys.length > 0) {
+                logger?.warn?.("[Hermes] ok:true response contained extra fields; preserved in info", {
+                    extraKeys
+                });
+            }
+            out.info = info;
+        }
+
+        markNormalized(out);
+        return out;
+    }
+
+    const result = collectExtraFields(payload, HERMES_KEYS_SUCCESS);
+    if (result) {
+        out.result = result;
+    }
+    if ("info" in payload && payload.info !== undefined) {
+        out.info = payload.info;
     }
 
     markNormalized(out);

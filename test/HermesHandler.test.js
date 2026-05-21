@@ -27,6 +27,106 @@ describe("HermesHandler", () => {
         expect(res).toEqual({ ok: true, result: 42 });
     });
 
+    it("normalizes non-envelope objects as the success result", async () => {
+        const sourceCandidates = ["content.js", "background.js"];
+        const hermes = new HermesHandler({
+            sources: () => ({ sourceCandidates })
+        });
+
+        const res = await hermes.dispatch({ type: "sources" });
+
+        expect(res).toEqual({ ok: true, result: { sourceCandidates } });
+    });
+
+    it("keeps explicit ok:true result first and moves success extras to info", async () => {
+        const sourceCandidates = ["content.js"];
+        const diagnostics = { inspected: 3 };
+        const warnings = ["fallback-used"];
+        const hermes = new HermesHandler({
+            sources: () => ({
+                ok: true,
+                result: { sourceCandidates },
+                diagnostics,
+                warnings
+            })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "sources" });
+
+        expect(res).toEqual({
+            ok: true,
+            result: { sourceCandidates },
+            info: { diagnostics, warnings }
+        });
+    });
+
+    it("normalizes ok:true shorthand fields as the success result", async () => {
+        const sourceCandidates = ["content.js", "background.js"];
+        const hermes = new HermesHandler({
+            sources: () => ({ ok: true, sourceCandidates })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "sources" });
+
+        expect(res).toEqual({ ok: true, result: { sourceCandidates } });
+    });
+
+    it("preserves ok:true shorthand info while extras become result", async () => {
+        const sourceCandidates = ["content.js"];
+        const info = { timingMs: 12 };
+        const hermes = new HermesHandler({
+            sources: () => ({ ok: true, sourceCandidates, info })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "sources" });
+
+        expect(res).toEqual({
+            ok: true,
+            result: { sourceCandidates },
+            info
+        });
+    });
+
+    it("keeps ok:false strict and preserves handler info under handlerInfo when extras exist", async () => {
+        const hermes = new HermesHandler({
+            fail: () => ({
+                ok: false,
+                error: "nope",
+                info: { timingMs: 12 },
+                diagnostics: { inspected: 3 }
+            })
+        }, { logger: null });
+
+        const res = await hermes.dispatch({ type: "fail" });
+
+        expect(res).toEqual({
+            ok: false,
+            error: "nope",
+            info: {
+                handlerInfo: { timingMs: 12 },
+                diagnostics: { inspected: 3 }
+            }
+        });
+    });
+
+    it("echoes requestId on ok:true shorthand unless the handler provides one", async () => {
+        const hermes = new HermesHandler({
+            echo: () => ({ ok: true, sourceCandidates: ["content.js"] }),
+            override: () => ({ ok: true, sourceCandidates: ["content.js"], requestId: "handler-set" })
+        }, { logger: null });
+
+        await expect(hermes.dispatch({ type: "echo", requestId: "request-set" })).resolves.toEqual({
+            ok: true,
+            result: { sourceCandidates: ["content.js"] },
+            requestId: "request-set"
+        });
+        await expect(hermes.dispatch({ type: "override", requestId: "request-set" })).resolves.toEqual({
+            ok: true,
+            result: { sourceCandidates: ["content.js"] },
+            requestId: "handler-set"
+        });
+    });
+
     it("returns error envelope for unknown type", async () => {
         const hermes = new HermesHandler({});
         const res = await hermes.dispatch({ type: "nope" });

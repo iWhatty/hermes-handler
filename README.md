@@ -100,7 +100,7 @@ List registered message types (registration order).
 
 ### Response envelope
 
-All responses follow a strict envelope. Hermes never mutates `result`; any unexpected or conflicting fields are preserved under `info`. If a handler returns inconsistent envelopes (e.g. `{ ok:false, error, result }`), Hermes warns and preserves extras under `info`. If a handler returns an envelope that already includes `info`, Hermes preserves it under `info.handlerInfo` when additional fields must also be recorded.
+All wire responses follow a strict envelope. Handler returns may use ergonomic shorthand, but Hermes normalizes every settled response before it leaves the router. Payload belongs under `result`, diagnostics belong under `info`, failures belong under `error`, and `requestId` is echoed from the request unless the handler provides one.
 
 **Success**
 
@@ -114,13 +114,40 @@ All responses follow a strict envelope. Hermes never mutates `result`; any unexp
 { ok: false, error: string, info?: any }
 ```
 
-Primitive return values are automatically normalized. `return "hello"` becomes `{ ok: true, result: "hello" }`. Malformed envelopes are coerced into valid error responses.
+Primitive and non-envelope return values are automatically normalized:
+
+```js
+return "hello";
+// -> { ok: true, result: "hello" }
+
+return { sourceCandidates };
+// -> { ok: true, result: { sourceCandidates } }
+```
+
+Success envelopes with an explicit `result` keep that result as the primary payload. Extra top-level fields are treated as diagnostics and moved into `info`:
+
+```js
+return { ok: true, result: { sourceCandidates }, diagnostics, warnings };
+// -> { ok: true, result: { sourceCandidates }, info: { diagnostics, warnings } }
+```
+
+Success envelopes without an explicit `result` treat non-canonical top-level fields as the primary payload:
+
+```js
+return { ok: true, sourceCandidates };
+// -> { ok: true, result: { sourceCandidates } }
+
+return { ok: true, sourceCandidates, info: { timingMs: 12 } };
+// -> { ok: true, result: { sourceCandidates }, info: { timingMs: 12 } }
+```
+
+Error envelopes stay strict: `ok:false` must include a string `error`. Extra fields on errors are moved into `info`; if the handler also provided `info`, Hermes preserves it under `info.handlerInfo` when combining it with those extras. Malformed envelopes are coerced into valid error responses.
 
 ### Handler return contract
 
 Every handler MUST settle the response by one of:
 
-1. **Return a value.** Primitives → `{ ok: true, result: value }`. Full envelopes (`{ ok, result?, error? }`) are passed through. Promises are awaited.
+1. **Return a value.** Primitives → `{ ok: true, result: value }`. Full envelopes (`{ ok, result?, error? }`) are normalized into canonical wire envelopes. Promises are awaited.
 2. **Call `ctx.send(payload)`.** Sync or async, before the handler's returned Promise settles. Subsequent `ctx.send` calls are ignored (idempotent).
 
 Returning `undefined` WITHOUT calling `ctx.send` settles the dispatch with `{ ok: false, error: "Handler ${type} returned no response" }` — this is treated as a handler bug, not a valid envelope.
