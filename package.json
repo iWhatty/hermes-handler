@@ -53,7 +53,7 @@
   "scripts": {
     "clean": "rimraf dist",
     "build": "pnpm run clean && pnpm run build:js && pnpm run build:types",
-    "build:js": "node ./scripts/copy-src-to-dist.mjs",
+    "build:js": "mkdir -p dist && cp -R src/. dist/",
     "build:types": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
     "test": "vitest run && pnpm run test:types",
