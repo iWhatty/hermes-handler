@@ -1,11 +1,10 @@
 # hermes-handler
 
-[![npm](https://img.shields.io/npm/v/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
-[![downloads](https://img.shields.io/npm/dm/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
-[![bundle size](https://img.shields.io/bundlephobia/minzip/hermes-handler)](https://bundlephobia.com/package/hermes-handler)
-[![license](https://img.shields.io/npm/l/hermes-handler)](https://github.com/iWhatty/hermes-handler/blob/main/LICENSE)
-[![stars](https://img.shields.io/github/stars/iWhatty/hermes-handler?style=social)](https://github.com/iWhatty/hermes-handler)
-[![types](https://img.shields.io/npm/types/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
+[![npm](https://badgen.net/npm/v/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
+[![downloads](https://badgen.net/npm/dm/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
+[![license](https://badgen.net/static/license/AGPL-3.0%20%2B%20terms/blue)](https://github.com/iWhatty/hermes-handler/blob/main/LICENSE)
+[![stars](https://badgen.net/github/stars/iWhatty/hermes-handler)](https://github.com/iWhatty/hermes-handler)
+[![types](https://badgen.net/npm/types/hermes-handler)](https://www.npmjs.com/package/hermes-handler)
 
 Lightweight, framework-agnostic message router for browser extensions and event-driven systems. Strict response envelope, built-in timeouts, cooperative cancellation, and a tiny client subpath for size-sensitive bundles.
 
