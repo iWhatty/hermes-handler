@@ -23,3 +23,4 @@ HermesHandler is a small public npm package, so changes should stay focused, wel
 - Do not bump the npm version or publish unless explicitly requested.
 - Keep npm package contents aligned with `package.json#files`.
 - Treat `dist/` as generated output.
+- CHANGELOG entries say what changed for someone using the package, a line or two each, with behavior changes called out. Leave out byte counts, tests, build and benchmark notes, refactors and commit hashes; commit messages and `docs/` carry those.
