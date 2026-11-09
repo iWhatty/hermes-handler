@@ -2,6 +2,79 @@ import { describe, it, expect } from "vitest";
 import { HermesHandler } from "../src/HermesHandler.js";
 
 describe("HermesHandler", () => {
+    it("registerMany adds functions and config entries and overwrites existing handlers", async () => {
+        const hermes = new HermesHandler({ ping: () => "old", keep: () => "kept" });
+
+        hermes.registerMany({
+            ping: () => "new",
+            echo: { handler: (msg) => msg.payload, timeoutMs: 0 }
+        });
+
+        await expect(hermes.dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "new" });
+        await expect(hermes.dispatch({ type: "echo", payload: 42 })).resolves.toEqual({ ok: true, result: 42 });
+        await expect(hermes.dispatch({ type: "keep" })).resolves.toEqual({ ok: true, result: "kept" });
+    });
+
+    it.each([undefined, null, {}])("registerMany accepts an empty map: %j", (map) => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+
+        expect(() => hermes.registerMany(map)).not.toThrow();
+        expect(hermes.types()).toEqual(["ping"]);
+    });
+
+    it("registerMany ignores inherited entries", () => {
+        const hermes = new HermesHandler();
+        const map = Object.create({ inherited: () => "ignored" });
+        map.own = () => "registered";
+
+        hermes.registerMany(map);
+
+        expect(hermes.types()).toEqual(["own"]);
+        expect(hermes.has("inherited")).toBe(false);
+    });
+
+    it.each([
+        [42, /must be a function or/],
+        [{ timeoutMs: 100 }, /must be a function or/],
+        [{ handler: () => "bad", timeoutMs: -1 }, /timeoutMs must be a non-negative/]
+    ])("registerMany validates entries without replacing a valid handler: %j", async (entry, error) => {
+        const hermes = new HermesHandler({ ping: () => "pong" });
+
+        expect(() => hermes.registerMany({ ping: entry })).toThrow(error);
+        await expect(hermes.dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+    });
+
+    it("unregister removes routing and tolerates repeated or missing removals", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong", keep: () => "kept" });
+
+        hermes.unregister("ping");
+        hermes.unregister("ping");
+        hermes.unregister("missing");
+
+        expect(hermes.has("ping")).toBe(false);
+        expect(hermes.types()).toEqual(["keep"]);
+        await expect(hermes.dispatch({ type: "ping" })).resolves.toEqual({
+            ok: false, error: "Unknown msg.type: ping"
+        });
+        await expect(hermes.dispatch({ type: "keep" })).resolves.toEqual({ ok: true, result: "kept" });
+    });
+
+    it("types returns an independent snapshot in registration order", () => {
+        const hermes = new HermesHandler();
+        expect(hermes.types()).toEqual([]);
+        hermes.registerMany({ first: () => 1, second: () => 2 });
+        const snapshot = hermes.types();
+        hermes.register("first", () => "replacement");
+        expect(hermes.types()).toEqual(["first", "second"]);
+        hermes.unregister("first");
+        hermes.register("first", () => 1);
+
+        expect(snapshot).toEqual(["first", "second"]);
+        snapshot.push("external");
+        expect(hermes.types()).toEqual(["second", "first"]);
+        expect(hermes.has("external")).toBe(false);
+    });
+
     // ------------------------------------------------------------
     // Basic Dispatch Behavior
     // ------------------------------------------------------------

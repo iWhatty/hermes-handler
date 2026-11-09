@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MessageChannel } from "node:worker_threads";
 import { postMessageTransport, servePostMessage } from "../../src/transports/postmessage.js";
 import { createHermesClient } from "../../src/client.js";
@@ -22,6 +22,57 @@ function makeFakePort() {
 }
 
 describe("postMessageTransport", () => {
+    it.each([null, undefined, false, 42, "noise"])("drops non-object wire data: %j", (data) => {
+        const port = makeFakePort();
+        const peer = makeFakePort();
+        peer.connect(port);
+        const received = vi.fn();
+        const unsubscribe = postMessageTransport(port).subscribe(received);
+
+        try {
+            peer.postMessage(data);
+            expect(received).not.toHaveBeenCalled();
+            const valid = { ok: true, requestId: "request-1", result: "pong" };
+            peer.postMessage(valid);
+            expect(received).toHaveBeenCalledTimes(1);
+            expect(received).toHaveBeenCalledWith(valid);
+        } finally {
+            unsubscribe();
+        }
+    });
+
+    it("forwards object messages without validating type or requestId", () => {
+        const port = makeFakePort();
+        const peer = makeFakePort();
+        peer.connect(port);
+        const received = vi.fn();
+        const unsubscribe = postMessageTransport(port).subscribe(received);
+        const messages = [{}, { type: "ping", requestId: 42 }, { type: "unknown" }];
+
+        try {
+            for (const message of messages) peer.postMessage(message);
+            expect(received.mock.calls).toEqual(messages.map(message => [message]));
+        } finally {
+            unsubscribe();
+        }
+    });
+
+    it.each([42, null, false, {}, []].map(value => [value]))("does not correlate a response with a non-string requestId: %j", async (requestId) => {
+        const port = makeFakePort();
+        const peer = makeFakePort();
+        peer.connect(port);
+        const dispatch = createHermesClient({ ...postMessageTransport(port), idGen: () => "42" });
+
+        try {
+            const pending = dispatch({ type: "ping" });
+            peer.postMessage({ ok: true, requestId, result: "wrong" });
+            peer.postMessage({ ok: true, requestId: "42", result: "right" });
+            await expect(pending).resolves.toEqual({ ok: true, result: "right" });
+        } finally {
+            dispatch.close();
+        }
+    });
+
     it("activates real MessagePort endpoints for a full client/server round-trip", async () => {
         const { port1: serverPort, port2: clientPort } = new MessageChannel();
         const originalServerStart = serverPort.start.bind(serverPort);
@@ -123,5 +174,75 @@ describe("postMessageTransport", () => {
     it("rejects targets that lack postMessage / addEventListener", () => {
         expect(() => postMessageTransport(null)).toThrow(/postMessage/);
         expect(() => postMessageTransport({ postMessage: () => {} })).toThrow(/addEventListener/);
+    });
+});
+
+describe("servePostMessage", () => {
+    it.each([null, undefined, false, 42, "noise", {}, { requestId: "request-1" }, { type: 42, requestId: "request-1" }])(
+        "ignores wire data without a string type: %j", (data) => {
+            const port = makeFakePort();
+            const peer = makeFakePort();
+            peer.connect(port);
+            const hermes = new HermesHandler({ ping: () => "pong" });
+            const dispatch = vi.spyOn(hermes, "dispatch");
+            const reply = vi.spyOn(port, "postMessage");
+            const stop = servePostMessage(hermes, port);
+
+            try {
+                peer.postMessage(data);
+                expect(dispatch).not.toHaveBeenCalled();
+                expect(reply).not.toHaveBeenCalled();
+            } finally {
+                stop();
+            }
+        }
+    );
+
+    it.each([42, null, false, {}, []].map(value => [value]))("preserves a supplied non-string requestId in the reply: %j", async (requestId) => {
+        const port = makeFakePort();
+        const peer = makeFakePort();
+        peer.connect(port);
+        const handler = vi.fn(() => "pong");
+        const reply = vi.spyOn(port, "postMessage");
+        const stop = servePostMessage(new HermesHandler({ ping: handler }), port);
+
+        try {
+            peer.postMessage({ type: "ping", requestId });
+            await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({
+                ok: true, result: "pong", requestId
+            }));
+            expect(reply).toHaveBeenCalledTimes(1);
+            expect(handler).toHaveBeenCalledTimes(1);
+        } finally {
+            stop();
+        }
+    });
+
+    it.each([false, true])("replies to unknown types with custom onUnknown=%s", async (custom) => {
+        const port = makeFakePort();
+        const peer = makeFakePort();
+        peer.connect(port);
+        const onUnknown = vi.fn((msg) => ({ ok: true, result: `fallback:${msg.type}` }));
+        const hermes = new HermesHandler({}, custom ? { onUnknown } : {});
+        const reply = vi.spyOn(port, "postMessage");
+        const stop = servePostMessage(hermes, port);
+        const message = { type: "unknown", requestId: "request-1" };
+
+        try {
+            peer.postMessage(message);
+            await vi.waitFor(() => expect(reply).toHaveBeenCalledWith(custom
+                ? { ok: true, result: "fallback:unknown", requestId: "request-1" }
+                : { ok: false, error: "Unknown msg.type: unknown", requestId: "request-1" }));
+            expect(reply).toHaveBeenCalledTimes(1);
+            if (custom) {
+                expect(onUnknown).toHaveBeenCalledTimes(1);
+                expect(onUnknown).toHaveBeenCalledWith(message, expect.objectContaining({
+                    requestId: "request-1",
+                    sender: { endpoint: port, event: { data: message } }
+                }));
+            }
+        } finally {
+            stop();
+        }
     });
 });
