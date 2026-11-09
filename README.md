@@ -18,7 +18,7 @@ Lightweight, framework-agnostic message router for browser extensions and event-
 - LLM-friendly deterministic contract
 - Framework-agnostic (no runtime dependencies)
 - Type-safe via generated `.d.ts`
-- Tiny client-side helper via `hermes-handler/client` subpath (≈ 1 KB minified). Speaks the same wire envelope without bringing the router class into size-sensitive bundles.
+- Client-side helper via `hermes-handler/client` subpath. Speaks the same wire envelope without bringing the router class into size-sensitive bundles.
 - Zero-copy worker RPC: `transfer` on requests, `ctx.transfer(...)` on responses, and `servePostMessage(hermes, self)` to serve a router from a Web Worker — Transferables move instead of being structured-cloned.
 
 ---
@@ -228,7 +228,7 @@ When `shouldHandle` is provided, it is the runtime listener ownership predicate.
 hermes-handler has two natural sides:
 
 - **Server side.** Runs the handlers. You want the full `HermesHandler` class here (routing, normalization, per-handler timeout, AbortSignal plumbing).
-- **Client side.** Sends a request and parses the envelope. You don't need the router; you need ~1 KB of wire-correlation glue.
+- **Client side.** Sends a request and parses the envelope using the client helper.
 
 For size-sensitive contexts (page-world bundles, popups, child processes), import the client subpath instead of the class:
 
@@ -252,6 +252,10 @@ else        console.warn(res.error, res.info);
 ```
 
 `createHermesClient` handles `requestId` correlation, per-call timeout, `AbortSignal`, and envelope normalization. The wire shape is the contract; the client is one implementation of it. Half-and-half is fine and often correct.
+
+`createHermesClient` defaults to a 5000 ms timeout. `defaultTimeoutMs` sets the client default; each dispatch can override it with `timeoutMs`. Non-positive or non-finite values disable the client timeout. A timeout or `AbortSignal` settles the local request; it does not cancel the remote handler. The client has no logger option.
+
+`idGen` must return a non-empty string unique among pending requests. Throws, empty IDs, and duplicate pending IDs resolve with error envelopes without sending. `close()` unsubscribes once, settles pending requests with a closed-client error, and prevents future sends and broadcasts.
 
 ### Workers + zero-copy transferables
 
@@ -326,7 +330,7 @@ If exceeded, hermes-handler returns:
 { ok: false, error: "Handler <type> timed out (7000 ms)" }
 ```
 
-Pick a timeout longer than the longest legitimate handler. If any handler awaits a `fetch()` or other network call, match or exceed that call's own timeout. Use `timeoutMs: 0` to opt out entirely when the caller doesn't care about the reply.
+Pick a timeout longer than the longest legitimate handler. If any handler awaits a `fetch()` or other network call, match or exceed that call's own timeout. Use `timeoutMs: 0` to wait for completion without a timeout; a response is still expected. The router default is 5000 ms. Per-handler `{ handler, timeoutMs }` overrides it and requires a non-negative finite number; `0` disables that handler's timeout. At the router option level, non-positive or non-finite numbers disable the timeout.
 
 ### Cooperative cancellation
 
@@ -373,14 +377,13 @@ const hermes = new HermesHandler(handlers, {
 
 ```ts
 interface HermesLogger {
-  debug?(message?: any, ...optionalParams: any[]): void;
   info?(message?: any, ...optionalParams: any[]): void;
   warn?(message?: any, ...optionalParams: any[]): void;
   error?(message?: any, ...optionalParams: any[]): void;
 }
 ```
 
-If `logger` is `null`, hermes-handler will not emit any console output.
+The router calls `warn` and `error` when needed; methods are optional. The logger is a constructor option and is not exposed on `ctx`. If `logger` is `null`, the router emits no logs of its own.
 
 ### Design goals
 

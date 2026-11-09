@@ -69,7 +69,7 @@ import { parseWireResponse } from "./internal/wire.js";
  *   function that the client invokes on `.close()`.
  * @property {number} [defaultTimeoutMs=5000]
  *   Default timeout in ms applied to each dispatch unless overridden. Set to
- *   0 (or any non-positive number) to disable by default.
+ *   0, a negative number, or a non-finite number to disable by default.
  * @property {() => string} [idGen]
  *   Optional requestId generator. Default produces `hermes-{timestamp}-{n}`.
  */
@@ -132,7 +132,7 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
     // dispatch responses) or by type (for broadcasts).
     /** @type {(() => void)|null} */
     let unsubscribeTransport = subscribe((msg) => {
-        if (!msg || typeof msg !== "object") return;
+        if (closed || !msg || typeof msg !== "object") return;
 
         if (typeof msg.requestId === "string") {
             const entry = pending.get(msg.requestId);
@@ -142,7 +142,7 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
 
         if (typeof msg.type === "string") {
             const handlers = broadcastHandlers.get(msg.type);
-            if (handlers && handlers.size > 0) {
+            if (handlers) {
                 for (const h of handlers) {
                     try { h(msg.payload, msg); } catch { /* swallow per-handler */ }
                 }

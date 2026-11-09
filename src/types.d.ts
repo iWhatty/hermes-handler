@@ -7,7 +7,7 @@
 //
 // Usage in a TypeScript project:
 //
-//   import { HermesHandler, createHermesClient, type ClientOf } from 'hermes-handler';
+//   import { HermesHandler, createHermesClient, type ClientOf, type HermesClient } from 'hermes-handler';
 //   import { postMessageTransport } from 'hermes-handler/transports/postmessage';
 //
 //   const hermes = new HermesHandler({
@@ -21,7 +21,8 @@
 //   });
 //
 //   type Client = ClientOf<typeof hermes>;
-//   const dispatch = createHermesClient<Client>(postMessageTransport(window));
+//   type ClientRoutes = Client extends HermesClient<infer R> ? R : never;
+//   const dispatch = createHermesClient<ClientRoutes>(postMessageTransport(window));
 //
 //   const r = await dispatch({ type: 'echo-string', payload: { value: 'hi' } });
 //   // r is: { ok: true, result: string, info?, requestId? } | { ok: false, error: string, info?, requestId? }

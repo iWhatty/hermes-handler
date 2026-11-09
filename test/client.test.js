@@ -290,6 +290,79 @@ describe("createHermesClient", () => {
         await expect(first).resolves.toEqual({ ok: true, result: "first" });
     });
 
+    it("ignores replies and broadcasts emitted during transport teardown", async () => {
+        const broadcast = vi.fn();
+        const dispatch = createHermesClient({
+            send: () => {},
+            subscribe: (handler) => () => {
+                handler({ type: "event", payload: "closing" });
+                handler({ requestId: "pending", ok: true, result: "late" });
+            },
+            idGen: () => "pending",
+            defaultTimeoutMs: 0,
+        });
+        dispatch.on("event", broadcast);
+        const pending = dispatch({ type: "hang" });
+
+        dispatch.close();
+
+        await expect(pending).resolves.toMatchObject({
+            ok: false,
+            info: { closed: true },
+        });
+        expect(broadcast).not.toHaveBeenCalled();
+    });
+
+    it("settles pending requests even when transport teardown throws", async () => {
+        const unsubscribe = vi.fn(() => { throw new Error("teardown failed"); });
+        const dispatch = createHermesClient({
+            send: () => {},
+            subscribe: () => unsubscribe,
+            defaultTimeoutMs: 0,
+        });
+        const pending = dispatch({ type: "hang" });
+
+        expect(() => dispatch.close()).toThrow("teardown failed");
+        await expect(pending).resolves.toMatchObject({ ok: false, info: { closed: true } });
+        expect(() => dispatch.close()).not.toThrow();
+        expect(unsubscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it("resolves an error without sending when idGen throws", async () => {
+        const send = vi.fn();
+        const dispatch = createHermesClient({
+            send,
+            subscribe: () => () => {},
+            idGen: () => { throw new Error("id failed"); },
+        });
+
+        await expect(dispatch({ type: "ping" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: requestId generation failed (id failed)",
+            info: { type: "ping" },
+        });
+        expect(send).not.toHaveBeenCalled();
+        dispatch.close();
+    });
+
+    it.each([NaN, Infinity, -1, 0])("disables non-positive or non-finite default timeouts (%s)", async (defaultTimeoutMs) => {
+        vi.useFakeTimers();
+        const dispatch = createHermesClient({
+            send: () => {},
+            subscribe: () => () => {},
+            defaultTimeoutMs,
+        });
+        try {
+            const pending = dispatch({ type: "hang" });
+            expect(vi.getTimerCount()).toBe(0);
+            dispatch.close();
+            await expect(pending).resolves.toMatchObject({ ok: false, info: { closed: true } });
+        } finally {
+            dispatch.close();
+            vi.useRealTimers();
+        }
+    });
+
     it("throws synchronously on factory misuse", () => {
         expect(() => createHermesClient({ subscribe: () => () => { } })).toThrow(/send/);
         expect(() => createHermesClient({ send: () => { } })).toThrow(/subscribe/);
@@ -391,7 +464,6 @@ describe("createHermesClient", () => {
             // Even if a broadcast handler is registered for the same `type`,
             // a message with a matching requestId routes to dispatch.
             const subscribers = new Set();
-            let serverReplyTo;
             const server = new HermesHandler({ ping: () => "pong" });
             const transport = {
                 send: (msg) => {

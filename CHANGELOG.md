@@ -2,6 +2,10 @@
 
 What changed for people using the package, per release. Entries before 1.1.0 were reconstructed from git history.
 
+## Unreleased
+
+- `client.close()` ignores replies and broadcasts emitted during transport teardown.
+
 ## 1.1.1 — 2026-11-02
 
 - `createHermesClient` is exported from the package root, matching the type declarations.

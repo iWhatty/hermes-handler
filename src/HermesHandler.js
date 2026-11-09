@@ -206,7 +206,7 @@ export class HermesHandler {
      * hermes.use(async (msg, ctx, next) => {
      *   const start = performance.now();
      *   const res = await next();
-     *   ctx.logger?.info?.(`[hermes] ${msg.type} ${(performance.now() - start).toFixed(1)}ms ok=${res.ok}`);
+     *   console.info(`[hermes] ${msg.type} ${(performance.now() - start).toFixed(1)}ms ok=${res.ok}`);
      *   return res;
      * });
      * ```
