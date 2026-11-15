@@ -223,6 +223,35 @@ const hermes = new HermesHandler(handlers, {
 
 When `shouldHandle` is provided, it is the runtime listener ownership predicate. If it returns `true`, hermes-handler uses normal dispatch behavior. If it returns `false`, the listener returns `false` without sending a response.
 
+### Guard: message boundaries and sender checks
+
+`hermes-handler/guard` declares which message names a listener accepts and who may send each one. It does not import `HermesHandler`; it produces a handler map and a middleware that `HermesHandler` accepts, and a plain `check` for listeners that do not use it.
+
+```js
+import { HermesHandler } from "hermes-handler";
+import { defineBoundary, classifySender, createGuard } from "hermes-handler/guard";
+
+const MSG = Object.freeze({ SAVE: "settings:save", PING: "ping" });
+
+const WORKER = defineBoundary("worker", MSG, {
+  rules: {
+    [MSG.SAVE]: { from: ["extension:popup", "page"], timeoutMs: 2000 },
+    [MSG.PING]: {},                              // from defaults to "any"
+  },
+});
+
+const guard = createGuard(WORKER, (sender) =>
+  classifySender(sender, { origin: chrome.runtime.getURL(""), pages: { popup: "/popup.html" } }));
+
+const hermes = new HermesHandler(WORKER.pair({ [MSG.SAVE]: save, [MSG.PING]: () => "pong" }));
+hermes.use(guard.middleware);
+```
+
+- `defineBoundary` throws at start-up on duplicate or empty names and when `rules` does not have exactly one row per name. `pair()` throws when a handler is missing or undeclared, and turns a rule's `timeoutMs` into a `{ handler, timeoutMs }` entry. `owns` fits the `shouldHandle` option.
+- `classifySender` returns `'extension'`, `'extension:<page>'`, `'page'` or `null`. `from: 'extension'` also accepts named pages; a `null` kind is always refused. `trusted: 'extension'` lets your own pages, named or not, send every message; it is off by default.
+- Refusals are `{ ok: false, error, info: { code, type } }` with `code` `UNKNOWN_TYPE` or `SENDER_REFUSED`. An optional `gate(rule, info)` runs after both checks and may return its own refusal.
+- The guard never reads `msg.payload` and logs nothing.
+
 ### Half-and-half: server router + tiny client
 
 hermes-handler has two natural sides:

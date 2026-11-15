@@ -127,3 +127,66 @@ function checkUnionNarrowing(r: HermesResponse<{ data: string }>) {
     }
 }
 void checkUnionNarrowing;
+
+// ============================================================================
+// hermes-handler/guard
+// ============================================================================
+
+import {
+    defineBoundary,
+    classifySender,
+    createGuard,
+    type Boundary,
+    type Refusal,
+    type Rule,
+} from "../src/guard.js";
+
+const NAMES = Object.freeze({ PING: "ping", SAVE: "save", STREAM: "stream" });
+const RULES: Record<string, Rule> = {
+    ping: { from: "any" },
+    save: { from: ["extension:popup", "page"], timeoutMs: 1000, feature: "core" },
+    stream: { from: "page", port: true },
+};
+const WORKER: Boundary = defineBoundary("worker", NAMES, { rules: RULES, trusted: "extension" });
+defineBoundary("array", ["a", "b"]);
+
+// @ts-expect-error — names must be strings
+defineBoundary("bad", [1, 2]);
+// @ts-expect-error — trusted is a single kind
+defineBoundary("bad", ["a"], { trusted: ["extension"] });
+
+const _types: readonly string[] = WORKER.types;
+const _rule: Rule | undefined = WORKER.rule("save");
+const _allowed: boolean = WORKER.allows("save", null);
+const _owns: boolean = WORKER.owns({ type: "ping" });
+void _types; void _rule; void _allowed; void _owns;
+
+const kind = classifySender({ url: "https://example.com/" }, { origin: "chrome-extension://id/", pages: { popup: "/popup.html" } });
+const _kind: "extension" | `extension:${string}` | "page" | null = kind;
+void _kind;
+// @ts-expect-error — origin is required
+classifySender({}, {});
+
+const paired = WORKER.pair({
+    ping: (): "pong" => "pong",
+    save: async (_msg: { payload: { v: number } }) => ({ saved: true }),
+});
+const guarded = new HermesHandler(paired, { logger: null, shouldHandle: WORKER.owns });
+
+const guard = createGuard(WORKER, (sender) => classifySender(sender, { origin: "chrome-extension://id/" }), {
+    gate: (rule, info) => {
+        const _type: string = info.type;
+        const _k: string = info.kind;
+        void _type; void _k;
+        return rule.feature === "ai" ? { ok: false, error: "held", code: "FEATURE_HELD" } : null;
+    },
+});
+guarded.use(guard.middleware);
+const refusal = guard.check("save", {});
+if (refusal && "info" in refusal) {
+    const _code: Refusal["info"]["code"] = (refusal as Refusal).info.code;
+    void _code;
+}
+
+// @ts-expect-error — classify must take a sender and return a kind or null
+createGuard(WORKER, (sender: unknown) => 1);
