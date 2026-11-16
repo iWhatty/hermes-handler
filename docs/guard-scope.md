@@ -325,14 +325,17 @@ are a wire contract with already-injected content scripts and are not touched;
 
 ## Constraints
 
-**Bundle cost, measured.** Prototype built with esbuild 0.20.2,
-`--bundle --minify --format=iife`, gzip level 9, baseline subtracted:
+**Bundle cost, measured.** The shipped `src/guard.js`, as reported by
+`test/guard.size.test.js` (esbuild, bundle, minify, iife, gzip level 9,
+baseline subtracted):
 
 | Bundle imports | Minified | Gzip |
 | --- | --- | --- |
-| `defineBoundary` only (a content script) | 1,150 B | 633 B |
-| all three exports (a background worker) | 1,826 B | 997 B |
-| all three, added to a bundle that already has `HermesHandler` | +1,828 B | +828 B |
+| `defineBoundary` only (a content script) | 1,529 B | 734 B |
+| all three exports (a background worker) | 2,488 B | 1,214 B |
+
+The scoping prototype measured 633 B and 997 B gzip; input validation and
+fuller error messages account for the difference.
 
 For scale, `HermesHandler` alone is 6,002 B minified and 2,194 B gzip. The
 final file will differ a little from the prototype; the build should fail a

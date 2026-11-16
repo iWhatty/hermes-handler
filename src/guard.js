@@ -20,7 +20,7 @@
  *   rule(type: string): Rule | undefined,
  *   allows(type: string, kind: string | null): boolean,
  *   pair<H extends Record<string, (...args: any[]) => any>>(handlers: H):
- *     Record<string, H[keyof H] | { handler: H[keyof H], timeoutMs: number }>,
+ *     { [K in keyof H]: H[K] | { handler: H[K], timeoutMs: number } },
  * }>} Boundary
  */
 
@@ -110,8 +110,9 @@ export function defineBoundary(label, names, options = {}) {
             const missing = [];
             /** @type {string[]} */
             const port = [];
-            /** @type {Record<string, any>} */
-            const out = {};
+            // No prototype, so a wire value such as "__proto__" is an ordinary key.
+            /** @type {any} */
+            const out = Object.create(null);
             for (const t of types) {
                 const row = /** @type {Rule} */ (map.get(t));
                 const h = own.includes(t) ? handlers[t] : undefined;
@@ -172,6 +173,12 @@ const refusal = (code, error, type) => ({ ok: false, error, info: { code, type }
  * Build a guard for one boundary. `check` refuses in a fixed order: undeclared
  * type, sender not allowed, then whatever `gate` returns (as given).
  *
+ * `gate` returns `null` or `undefined` to let the message through, or a
+ * refusal object with `ok: false` to refuse it. Anything else throws, so a
+ * gate written as a boolean predicate cannot answer for the handler. A gate
+ * refusal that goes through `middleware` should carry its code in `info`,
+ * like the guard's own; HermesHandler moves other keys there and warns.
+ *
  * @param {Boundary} boundary
  * @param {(sender: unknown) => string | null} classify
  * @param {{ gate?: (rule: Rule, info: { type: string, kind: string, sender: unknown, msg?: unknown }) => object | null | undefined }} [options]
@@ -193,7 +200,12 @@ export function createGuard(boundary, classify, options = {}) {
         if (!kind || !boundary.allows(type, kind)) {
             return refusal("SENDER_REFUSED", `${type} is not accepted from this sender.`, type);
         }
-        return (gate && gate(/** @type {Rule} */ (boundary.rule(type)), { type, kind, sender, msg })) || null;
+        const held = gate && gate(/** @type {Rule} */ (boundary.rule(type)), { type, kind, sender, msg });
+        if (held == null) return null;
+        if (typeof held !== "object" || /** @type {any} */ (held).ok !== false) {
+            throw new TypeError(`Guard ${boundary.label}: gate must return null or a refusal with ok: false`);
+        }
+        return held;
     };
     return {
         check,

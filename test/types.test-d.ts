@@ -173,6 +173,18 @@ const paired = WORKER.pair({
 });
 const guarded = new HermesHandler(paired, { logger: null, shouldHandle: WORKER.owns });
 
+// pair() keeps each route's types, so dispatch stays typed.
+async function checkPairedDispatch() {
+    const r = await guarded.dispatch({ type: "ping" });
+    if (r.ok) {
+        const _pong: "pong" = r.result!;
+        void _pong;
+    }
+    // @ts-expect-error — 'nope' is not a paired route
+    await guarded.dispatch({ type: "nope" });
+}
+void checkPairedDispatch;
+
 const guard = createGuard(WORKER, (sender) => classifySender(sender, { origin: "chrome-extension://id/" }), {
     gate: (rule, info) => {
         const _type: string = info.type;

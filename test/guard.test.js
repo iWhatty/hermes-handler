@@ -213,6 +213,15 @@ describe("defineBoundary", () => {
             expect(() => c.pair({})).toThrow(/no handler function for: toString/);
         });
 
+        it("keeps a handler whose wire value is __proto__", async () => {
+            const b = defineBoundary("B", ["__proto__", "a"]);
+            const paired = b.pair({ ["__proto__"]: () => "proto", a: () => "a" });
+
+            expect(Object.keys(paired)).toEqual(["__proto__", "a"]);
+            await expect(new HermesHandler(paired, { logger: null }).dispatch({ type: "__proto__" }))
+                .resolves.toEqual({ ok: true, result: "proto" });
+        });
+
         it("feeds HermesHandler, which applies the rule's timeout", async () => {
             const t = defineBoundary("T", ["slow"], { rules: { slow: { timeoutMs: 20 } } });
             /** @type {AbortSignal | undefined} */
@@ -435,6 +444,20 @@ describe("createGuard with a real HermesHandler", () => {
 
         await expect(hermes.dispatch({ type: "ping" }, CONTENT)).resolves.toEqual({ ok: false, error: "gate broke" });
     });
+
+    it.each([[true], [false], ["held"], [{ ok: true }], [{ error: "held" }]])(
+        "rejects a gate result that is not null or a refusal: %j",
+        async (result) => {
+            const handler = vi.fn(() => "ran");
+            const b = defineBoundary("B", ["p"]);
+            const guard = createGuard(b, () => "page", { gate: () => /** @type {any} */ (result) });
+            const hermes = new HermesHandler(b.pair({ p: handler }), { logger: null }).use(guard.middleware);
+
+            expect(() => guard.check("p", CONTENT)).toThrow(/gate must return null or a refusal/);
+            await expect(hermes.dispatch({ type: "p" }, CONTENT)).resolves.toMatchObject({ ok: false });
+            expect(handler).not.toHaveBeenCalled();
+        }
+    );
 
     it("does not read msg.payload", async () => {
         const { hermes } = setup();

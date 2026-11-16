@@ -7,6 +7,7 @@ What changed for people using the package, per release. Entries before 1.1.0 wer
 - New `hermes-handler/guard` subpath with `defineBoundary`, `classifySender` and `createGuard`: declare the message names a listener accepts and which senders may send each one.
 - `defineBoundary(...).pair(handlers)` checks handlers against the declared names at start-up and applies each rule's `timeoutMs`.
 - Guard refusals are `{ ok: false, error, info: { code, type } }` with `code` `UNKNOWN_TYPE` or `SENDER_REFUSED`; the guard reads no payload and logs nothing.
+- A guard `gate` returns `null` to allow a message or a refusal with `ok: false`; any other return value throws instead of answering for the handler.
 - `client.close()` ignores replies and broadcasts emitted during transport teardown.
 
 ## 1.1.1 — 2026-11-02
