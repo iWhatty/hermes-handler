@@ -1,14 +1,5 @@
-// src/internal/wire.js
-//
-// Client-side wire parsing — kept separate from envelope.js's
-// router-side normalization so the client bundle doesn't pull in
-// the marker Symbol, key sets, collectInfo, normalize, and freeze
-// helpers (~4 KB gz of router-only code that the client never
-// references but a single shared module can't tree-shake away).
-//
-// Router and client share the wire CONTRACT (same envelope shape);
-// they don't share the IMPLEMENTATION (router produces, client
-// consumes).
+// Parse server replies for the client. Keeping this module independent from
+// router-side normalization keeps the client entry point small.
 
 /**
  * @typedef {{ ok: true, result?: any, info?: any }} HermesClientOk
@@ -18,6 +9,7 @@
 
 /**
  * Parse an incoming wire message into a canonical client-side envelope.
+ * The caller has already used the wire requestId to find the pending request.
  * Returns one of:
  *   - `{ ok: true, result?, info? }`              ← well-formed success
  *   - `{ ok: false, error, info? }`               ← well-formed error

@@ -45,7 +45,7 @@ runtime listener
 
 `getListener()` applies listener ownership rules before dispatch. Direct `dispatch()` deliberately bypasses that gate so tests, adapters, and non-extension callers always receive a deterministic Hermes response.
 
-Middleware is composed in registration order, with the first middleware acting as the outermost wrapper. The terminal handler result is normalized before returning through the middleware chain. A final normalization pass is intentional and idempotent.
+Middleware runs in registration order, with the first registration wrapping the rest of the chain. The terminal handler normalizes its result before returning it to middleware. Dispatch then finalizes and freezes the chosen response before associating any transfer list.
 
 ### Router invariants
 
@@ -73,7 +73,7 @@ dispatch request
   -> clear pending resources and resolve once
 ```
 
-Messages with a `requestId` are treated as responses. Messages without one are treated as broadcasts and routed by `type` to `.on()` subscribers.
+A string `requestId` routes a message to a pending request. The client uses that field for correlation and returns the parsed response without the top-level wire ID. Other messages can route by `type` to `.on()` subscribers.
 
 ### Client invariants
 
@@ -94,6 +94,8 @@ Messages with a `requestId` are treated as responses. Messages without one are t
 - `broadcastChannelTransport` relays peer messages across same-origin contexts.
 
 Transport adapters must clean up subscriptions, preserve request correlation, and convert observable failures into Hermes error envelopes instead of allowing silent hangs or unhandled rejections.
+
+The two postMessage adapters share endpoint send conventions and discriminator handling. They apply their own inbound checks before passing messages to a client subscriber or the router.
 
 ## Type architecture
 

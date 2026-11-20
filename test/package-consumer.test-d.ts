@@ -34,6 +34,15 @@ const transport: CreateHermesClientOptions = {
 
 const rootClient = createRootClient(transport);
 const client = createHermesClient(transport);
+const queuedMessages: unknown[] = [];
+const queuedClient = createHermesClient({
+    ...transport,
+    send: (msg) => queuedMessages.push(msg),
+});
+const asyncClient = createRootClient({
+    ...transport,
+    send: async () => "sent",
+});
 const router = new HermesHandler({
     ping: () => "pong" as const,
     echo: (msg: { payload: { value: string } }) => msg.payload.value,
@@ -65,6 +74,8 @@ setTransferList(response, []);
 
 void rootClient;
 void client;
+void queuedClient;
+void asyncClient;
 void clientResponse;
 
 async function checkTypedClients() {

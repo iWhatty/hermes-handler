@@ -68,6 +68,56 @@ function subscribeToMessages(endpoint, listener) {
 }
 
 /**
+ * Send one message using the overload supported by the endpoint shape.
+ * Window endpoints receive a target origin, while workers and ports receive
+ * the optional transfer list as their second argument.
+ * @param {any} endpoint
+ * @param {any} message
+ * @param {string} targetOrigin
+ * @param {Transferable[]|undefined} transfer
+ * @param {boolean} isWindow
+ */
+function postMessageToEndpoint(endpoint, message, targetOrigin, transfer, isWindow) {
+    const hasTransfer = Array.isArray(transfer) && transfer.length > 0;
+    if (isWindow) {
+        if (hasTransfer) endpoint.postMessage(message, targetOrigin, transfer);
+        else endpoint.postMessage(message, targetOrigin);
+    } else if (hasTransfer) {
+        endpoint.postMessage(message, transfer);
+    } else {
+        endpoint.postMessage(message);
+    }
+}
+
+/**
+ * Check the discriminator fields attached to an inbound message.
+ * @param {any} data
+ * @param {Record<string, any>} inbound
+ * @param {string[]} inboundKeys
+ * @returns {boolean}
+ */
+function matchesInboundDiscriminators(data, inbound, inboundKeys) {
+    for (const key of inboundKeys) {
+        if (data[key] !== inbound[key]) return false;
+    }
+    return true;
+}
+
+/**
+ * Remove transport-only discriminator fields before handing a message to the
+ * client or router. Preserve the original object when there is nothing to do.
+ * @param {any} data
+ * @param {string[]} inboundKeys
+ * @returns {any}
+ */
+function stripInboundDiscriminators(data, inboundKeys) {
+    if (inboundKeys.length === 0) return data;
+    const canonical = { ...data };
+    for (const key of inboundKeys) delete canonical[key];
+    return canonical;
+}
+
+/**
  * @param {any} target  Window, MessagePort, Worker, or anything with postMessage + addEventListener.
  * @param {PostMessageTransportOptions} [opts]
  */
@@ -93,14 +143,7 @@ export function postMessageTransport(target, opts = {}) {
      */
     const send = (msg, transfer) => {
         const enveloped = { ...outbound, ...msg };
-        const hasTransfer = Array.isArray(transfer) && transfer.length > 0;
-        if (isWindow) {
-            if (hasTransfer) target.postMessage(enveloped, targetOrigin, transfer);
-            else target.postMessage(enveloped, targetOrigin);
-        } else {
-            if (hasTransfer) target.postMessage(enveloped, transfer);
-            else target.postMessage(enveloped);
-        }
+        postMessageToEndpoint(target, enveloped, targetOrigin, transfer, isWindow);
     };
 
     /** @param {(msg: any) => void} handler */
@@ -115,19 +158,9 @@ export function postMessageTransport(target, opts = {}) {
             if (event.source != null && event.source !== target && event.source !== globalThis) return;
             const data = event.data;
             if (!data || typeof data !== "object") return;
-            for (const k of inboundKeys) {
-                if (data[k] !== inbound[k]) return;
-            }
+            if (!matchesInboundDiscriminators(data, inbound, inboundKeys)) return;
             if (filter && !filter(event)) return;
-            // Strip the inbound discriminator keys before passing the
-            // canonical envelope to the client (it filters by requestId).
-            if (inboundKeys.length === 0) {
-                handler(data);
-            } else {
-                const canonical = { ...data };
-                for (const k of inboundKeys) delete canonical[k];
-                handler(canonical);
-            }
+            handler(stripInboundDiscriminators(data, inboundKeys));
         };
         // MessagePort only begins dispatching addEventListener listeners after
         // start(). Window and Worker-style endpoints do not expose it.
@@ -209,14 +242,7 @@ export function servePostMessage(hermes, endpoint, opts = {}) {
         const enveloped = inboundKeys.length === 0 && Object.keys(outbound).length === 0
             ? envelope
             : { ...outbound, ...envelope };
-        const hasTransfer = Array.isArray(transfer) && transfer.length > 0;
-        if (isWindow) {
-            if (hasTransfer) endpoint.postMessage(enveloped, targetOrigin, transfer);
-            else endpoint.postMessage(enveloped, targetOrigin);
-        } else {
-            if (hasTransfer) endpoint.postMessage(enveloped, transfer);
-            else endpoint.postMessage(enveloped);
-        }
+        postMessageToEndpoint(endpoint, enveloped, targetOrigin, transfer, isWindow);
     };
 
     /** @param {any} event */
@@ -227,16 +253,10 @@ export function servePostMessage(hermes, endpoint, opts = {}) {
         // worker global where our own replies also fire 'message' locally
         // in some test harnesses): requests never carry `ok`.
         if ("ok" in data) return;
-        for (const k of inboundKeys) {
-            if (data[k] !== inbound[k]) return;
-        }
+        if (!matchesInboundDiscriminators(data, inbound, inboundKeys)) return;
         if (filter && !filter(event)) return;
 
-        const msg = inboundKeys.length === 0 ? data : (() => {
-            const canonical = { ...data };
-            for (const k of inboundKeys) delete canonical[k];
-            return canonical;
-        })();
+        const msg = stripInboundDiscriminators(data, inboundKeys);
 
         let dispatchPromise;
         try {

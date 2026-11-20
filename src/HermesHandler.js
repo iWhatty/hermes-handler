@@ -1,14 +1,5 @@
-// src/HermesHandler.js
-//
-// ------------------------------------------------------------
-// HermesHandler  — universal message router / gatekeeper
-// ------------------------------------------------------------
-//
-// Routing logic lives here. Wire-envelope normalization, timeout
-// primitives, and error stringification have moved to
-// `src/internal/` so the client (`src/client.js`) shares the same
-// contract. Refactor history: helpers were inlined here through
-// 1.0.0; 1.0.1 extracted the shared pieces.
+// The router owns route selection, listener ownership, and middleware.
+// Internal modules handle envelope normalization, timeouts, and transfer metadata.
 
 import { normalizePayload, freezeNormalized } from "./internal/envelope.js";
 import { withTimeout } from "./internal/timeout.js";
@@ -84,6 +75,7 @@ import { setTransferList } from "./internal/transfer.js";
  * @returns {HermesResponse<any>|Promise<HermesResponse<any>>|any}
  */
 
+/** @typedef {(msg: any, ctx: any, next: () => Promise<any>) => any} HermesMiddlewareFn */
 
 /**
  * @callback HermesShouldHandleFn
@@ -170,16 +162,6 @@ function createDispatchAbortContext() {
         },
     };
 }
-/**
- * Report a runtime-listener boundary failure without letting a custom logger
- * turn the defensive path into another thrown error.
- * @param {HermesLogger | null} logger
- * @param {string} message
- * @param {any} err
- */
-function reportListenerError(logger, message, err) {
-    safeLog(logger, "error", message, err);
-}
 /** @param {any} type */
 function validateRouteName(type) {
     if (typeof type !== "string" || type.length === 0) {
@@ -211,6 +193,35 @@ function normalizeHandlerEntry(type, entry) {
         return entry;
     }
     throw new Error(`Handler for ${type} must be a function or { handler, ...config } object`);
+}
+
+/**
+ * Compose middleware around a terminal dispatch operation.
+ *
+ * Build the wrappers in reverse so the first registration runs first. Awaiting
+ * each middleware here routes synchronous throws and rejections to the same hook.
+ *
+ * @param {HermesMiddlewareFn[]} middleware
+ * @param {() => Promise<any>} terminal
+ * @param {any} msg
+ * @param {any} ctx
+ * @param {(err: any) => HermesResponse<any>} onMiddlewareError
+ * @returns {() => Promise<any>}
+ */
+function composeMiddleware(middleware, terminal, msg, ctx, onMiddlewareError) {
+    let chain = terminal;
+    for (let i = middleware.length - 1; i >= 0; i--) {
+        const middlewareFn = middleware[i];
+        const next = chain;
+        chain = async () => {
+            try {
+                return await middlewareFn(msg, ctx, next);
+            } catch (err) {
+                return onMiddlewareError(err);
+            }
+        };
+    }
+    return chain;
 }
 
 
@@ -272,7 +283,7 @@ export class HermesHandler {
         this._ignoreUnknown = ignoreUnknown === true;
         this._shouldHandle = isFn(shouldHandle) ? shouldHandle : null;
 
-        /** @type {Array<(msg: any, ctx: any, next: () => Promise<any>) => any>} */
+        /** @type {HermesMiddlewareFn[]} */
         this._middleware = [];
 
         /** @type {HermesLogger|null} */
@@ -306,7 +317,7 @@ export class HermesHandler {
      * });
      * ```
      *
-     * @param {(msg: any, ctx: any, next: () => Promise<any>) => any} fn
+     * @param {HermesMiddlewareFn} fn
      * @returns {this}
      */
     use(fn) {
@@ -367,13 +378,10 @@ export class HermesHandler {
 
 
     /**
-    * The listener you add using browser.runtime.onMessage.addListener
-    *
-    * Supports BOTH reply styles:
-    * • Promise-returning listener (Firefox / MV3 / polyfill)
-    * • sendResponse + return true (callback-style)
-    * @returns {(msg: any, sender: any, sendResponse?: (payload: any) => void) => any}
-    */
+     * Create a listener for runtime.onMessage. For claimed messages, return the
+     * dispatch promise or keep the reply channel open for the callback.
+     * @returns {(msg: any, sender: any, sendResponse?: (payload: any) => void) => any}
+     */
     getListener() {
         return (msg, sender, sendResponse) => {
             const ownership = this._ownsMessage(msg, sender);
@@ -382,35 +390,31 @@ export class HermesHandler {
             }
 
             const tabId = readSenderTabId(sender);
-            const p = this._dispatch(msg, sender, typeof ownership === "string" ? ownership : undefined, tabId);
+            const dispatchPromise = this._dispatch(
+                msg,
+                sender,
+                typeof ownership === "string" ? ownership : undefined,
+                tabId,
+            );
 
+            // Promise-returning listeners can return the dispatch directly.
+            if (!isFn(sendResponse)) return dispatchPromise;
 
-            // Callback-style (works everywhere)
-            if (isFn(sendResponse)) {
-                /** @param {any} response */
-                const respond = (response) => {
-                    try {
-                        sendResponse(response);
-                    } catch (err) {
-                        reportListenerError(this._logger, "[Hermes] sendResponse error:", err);
-                    }
-                };
+            /** @param {any} response */
+            const respond = (response) => {
+                try {
+                    sendResponse(response);
+                } catch (err) {
+                    safeLog(this._logger, "error", "[Hermes] sendResponse error:", err);
+                }
+            };
 
-                p.then(
-                    respond,
-                    (err) => respond(
-                        this._errorEnvelope(err, msg, { sender, tabId })
-                    )
-                );
+            dispatchPromise.then(
+                respond,
+                (err) => respond(this._errorEnvelope(err, msg, { sender, tabId })),
+            );
 
-                return true; // keep the port open for async response
-            }
-
-
-
-
-            // Promise-returning style
-            return p;
+            return true; // keep the port open for async response
         };
     }
 
@@ -429,7 +433,7 @@ export class HermesHandler {
             try {
                 return this._shouldHandle(msg, sender) === true;
             } catch (err) {
-                reportListenerError(this._logger, "[Hermes] shouldHandle error:", err);
+                safeLog(this._logger, "error", "[Hermes] shouldHandle error:", err);
                 return false;
             }
         }
@@ -440,6 +444,7 @@ export class HermesHandler {
 
         const type = readMessageField(msg, "type");
         if (typeof type !== "string" || type.length === 0 || !this._handlers.has(type)) return false;
+        // Return the validated type so dispatch does not invoke a getter twice.
         return type;
     }
 
@@ -505,6 +510,9 @@ export class HermesHandler {
 
         const ctx = {
             sender,
+            // Two- and three-argument legacy _dispatch callers still derive
+            // tabId here. The four-argument listener path already captured it
+            // before dispatch, including an intentional `undefined` value.
             tabId: arguments.length >= 4 ? tabId : readSenderTabId(sender),
             signal: abortContext.signal,
             requestId: reqId,
@@ -564,22 +572,16 @@ export class HermesHandler {
             }
         };
 
-        // Compose middleware chain: middleware registered first wraps
-        // middleware registered later, with handlerInvocation as the
-        // innermost call. Each middleware is `(msg, ctx, next) => response`.
-        let chain = handlerInvocation;
-        for (let i = this._middleware.length - 1; i >= 0; i--) {
-            const mw = this._middleware[i];
-            const inner = chain;
-            chain = async () => {
-                try {
-                    return await mw(msg, ctx, inner);
-                } catch (err) {
-                    safeLog(this._logger, "error", `[Hermes] Middleware error for ${type}:`, err);
-                    return this._errorEnvelope(err, msg, ctx);
-                }
-            };
-        }
+        const chain = composeMiddleware(
+            this._middleware,
+            handlerInvocation,
+            msg,
+            ctx,
+            (err) => {
+                safeLog(this._logger, "error", `[Hermes] Middleware error for ${type}:`, err);
+                return this._errorEnvelope(err, msg, ctx);
+            },
+        );
 
         try {
             const chainResponse = await chain();

@@ -1,30 +1,7 @@
-// src/client.js
-//
-// Lightweight client-side helper for the Hermes wire envelope.
-//
-// HermesHandler (the class in ./HermesHandler.js) is the **router** — what
-// you run on the side that owns the handlers (background SW, content
-// script, parent process, etc.).
-//
-// This module is the **client** — what you run on the side that sends a
-// request and parses the response envelope. It does not include any of
-// the routing, registration, or per-handler timeout machinery, so it is
-// dramatically smaller than the full class. Use this in page-world
-// bundles, popup bundles, or any context where every byte counts.
-//
-// The wire envelope is the contract:
-//
-//   dispatch request:    { type, payload?, requestId }
-//   dispatch response:   { ok: true,  result?, info?, requestId }
-//                        { ok: false, error,   info?, requestId }
-//   broadcast (server→client, no reply expected):
-//                        { type, payload? }     ← no requestId
-//
-// You provide the transport (`send` and `subscribe`); the client handles
-// requestId correlation for dispatches AND fans out broadcasts to
-// type-keyed subscribers registered via `.on(type, handler)`.
-//
-// The wire shape is the contract; the class is one implementation of it.
+// The client sends requests through a supplied transport and matches replies
+// by their wire requestId. Dispatch resolves to the parsed response envelope.
+// Messages without a requestId can reach type-based broadcast subscribers.
+// This entry point has no dependency on the router or its envelope producer.
 
 import { parseWireResponse } from "./internal/wire.js";
 import { toErrorString } from "./internal/errors.js";
@@ -58,9 +35,9 @@ import { toErrorString } from "./internal/errors.js";
 
 /**
  * @typedef {Object} CreateHermesClientOptions
- * @property {(msg: any, transfer?: Transferable[]) => void | PromiseLike<void>} send
- *   Called once per dispatch. Fire-and-forget; replies arrive via `subscribe`.
- *   Throwing here resolves the dispatch with an error envelope (does not throw).
+ * @property {(msg: any, transfer?: Transferable[]) => void} send
+ *   Sends the request. Replies arrive through `subscribe`. A synchronous throw
+ *   or a rejected thenable settles the request with an error envelope.
  *   The second argument carries the request's transfer list when one was
  *   provided; transports that can't transfer may ignore it.
  * @property {(handler: (msg: any) => void) => () => void} subscribe
@@ -131,46 +108,45 @@ export function createHermesClient(opts) {
      * @returns {HermesClientResponse<any>}
      */
     const closedResponse = (info) => {
-        const response = /** @type {HermesClientResponse<any>} */ ({
+        return {
             ok: false,
             error: "Hermes client: client is closed",
-            info: { closed: true },
-        });
-        if (info) Object.assign(response.info, info);
-        return response;
+            info: { closed: true, ...info },
+        };
     };
 
-    // Single persistent transport subscription. Fans out by requestId (for
-    // dispatch responses) or by type (for broadcasts).
-    /** @type {(() => void)|null} */
-    let unsubscribeTransport = subscribe((msg) => {
+    /** @param {any} msg */
+    function onTransportMessage(msg) {
         if (closed || !msg || typeof msg !== "object") return;
 
         let requestId;
         try { requestId = msg.requestId; } catch { return; }
         if (typeof requestId === "string") {
-            const entry = pending.get(requestId);
-            if (entry) entry.onWireResponse(msg);
+            // An unmatched reply can arrive after a timeout or abort.
+            pending.get(requestId)?.onWireResponse(msg);
             return;
         }
 
         let type;
         try { type = msg.type; } catch { return; }
-        if (typeof type === "string") {
-            const handlers = broadcastHandlers.get(type);
-            if (handlers && handlers.size > 0) {
-                let payload;
-                try { payload = msg.payload; } catch { return; }
-                for (const h of handlers) {
-                    try { h(payload, msg); } catch { /* swallow per-handler */ }
-                }
-            }
-        }
-    });
+        if (typeof type !== "string") return;
 
+        const handlers = broadcastHandlers.get(type);
+        if (!handlers?.size) return;
+
+        let payload;
+        try { payload = msg.payload; } catch { return; }
+        for (const handler of handlers) {
+            try { handler(payload, msg); } catch { /* Keep delivering to other subscribers. */ }
+        }
+    }
+
+    /** @type {(() => void)|null} */
+    let unsubscribeTransport = subscribe(onTransportMessage);
     if (typeof unsubscribeTransport !== "function") {
         throw new TypeError("createHermesClient: `subscribe` must return an unsubscribe function");
     }
+
     /**
      * @param {HermesClientRequest} [req]
      * @returns {Promise<HermesClientResponse<any>>}
@@ -272,13 +248,10 @@ export function createHermesClient(opts) {
                 resolve(response);
             };
 
-            /** @param {any} msg */
-            const onWireResponse = (msg) => {
-                settle(/** @type {HermesClientResponse<any>} */ (parseWireResponse(msg, { requestId })));
-            };
-
+            // Publish the entry before signal setup and send, which can both
+            // call back synchronously.
             pending.set(requestId, {
-                onWireResponse,
+                onWireResponse: (message) => settle(parseWireResponse(message, { requestId })),
                 close: () => settle(closedResponse({ requestId, type })),
             });
 
@@ -326,6 +299,7 @@ export function createHermesClient(opts) {
                 const sendResult = send({ type, payload, requestId }, transfer);
                 if (sendResult !== undefined) {
                     const observed = Promise.resolve(sendResult);
+                    // A transport can return a native promise with a throwing `then` getter.
                     Promise.prototype.then.call(observed, undefined, onSendFailure);
                 }
             } catch (err) {
@@ -351,18 +325,13 @@ export function createHermesClient(opts) {
             throw new TypeError("dispatch.on: handler must be a function");
         }
         if (closed) return () => {};
-        let set = broadcastHandlers.get(type);
-        if (!set) {
-            set = new Set();
-            broadcastHandlers.set(type, set);
+        let handlers = broadcastHandlers.get(type);
+        if (!handlers) {
+            handlers = new Set();
+            broadcastHandlers.set(type, handlers);
         }
-        set.add(handler);
-        return () => {
-            const s = broadcastHandlers.get(type);
-            if (!s) return;
-            s.delete(handler);
-            if (s.size === 0) broadcastHandlers.delete(type);
-        };
+        handlers.add(handler);
+        return () => off(type, handler);
     };
 
     /**
@@ -372,12 +341,13 @@ export function createHermesClient(opts) {
      * @param {string} type
      * @param {(payload: any, msg: any) => void} handler
      */
-    dispatch.off = function off(type, handler) {
-        const s = broadcastHandlers.get(type);
-        if (!s) return;
-        s.delete(handler);
-        if (s.size === 0) broadcastHandlers.delete(type);
-    };
+    function off(type, handler) {
+        const handlers = broadcastHandlers.get(type);
+        if (!handlers) return;
+        handlers.delete(handler);
+        if (handlers.size === 0) broadcastHandlers.delete(type);
+    }
+    dispatch.off = off;
 
     /**
      * Tear down the transport subscription. After calling `.close()`, the
@@ -386,6 +356,7 @@ export function createHermesClient(opts) {
      */
     dispatch.close = function close() {
         if (closed) return;
+        // A transport can deliver messages while unsubscribing.
         closed = true;
 
         const unsubscribe = unsubscribeTransport;

@@ -111,6 +111,41 @@ describe("postMessageTransport worker-shaped events", () => {
 });
 
 describe("postMessageTransport transfer forwarding", () => {
+    it("keeps the target origin and transfer list in the Window argument positions", async () => {
+        const endpoint = {
+            location: {},
+            document: {},
+            postMessage: vi.fn(),
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+        };
+        const targetOrigin = "https://example.test";
+        const request = { type: "op", requestId: "r1" };
+        const transfer = [new ArrayBuffer(8)];
+        const transport = postMessageTransport(endpoint, { targetOrigin });
+        transport.send(request, []);
+        transport.send(request, transfer);
+        expect(endpoint.postMessage.mock.calls).toStrictEqual([
+            [request, targetOrigin],
+            [request, targetOrigin, transfer],
+        ]);
+
+        const response = { ok: true, result: transfer[0], requestId: "r1" };
+        setTransferList(response, transfer);
+        const stop = servePostMessage({ dispatch: () => response }, endpoint, { targetOrigin });
+        try {
+            const posted = new Promise((resolve) => endpoint.postMessage.mockImplementationOnce(resolve));
+            const [, listener] = endpoint.addEventListener.mock.calls[0];
+            listener({ data: request });
+            await posted;
+
+            expect(endpoint.postMessage).toHaveBeenLastCalledWith(response, targetOrigin, transfer);
+            expect(endpoint.postMessage.mock.contexts).toEqual([endpoint, endpoint, endpoint]);
+        } finally {
+            stop();
+        }
+    });
+
     it("passes the transfer list to a port-style target", () => {
         const [port] = endpointPair();
         const transport = postMessageTransport(port);
