@@ -203,7 +203,7 @@ export type HermesClientRequest<R, K extends string = string> = {
 };
 
 export type HermesClientTransport = {
-    send: (msg: { type: string; payload?: unknown; requestId: string }, transfer?: Transferable[]) => void;
+    send: (msg: { type: string; payload?: unknown; requestId: string }, transfer?: Transferable[]) => void | PromiseLike<void>;
     subscribe: (handler: (msg: unknown) => void) => () => void;
 };
 
@@ -236,8 +236,11 @@ export function createHermesClient<
     R extends Record<string, { request: unknown; response: unknown }> = Record<string, { request: unknown; response: unknown }>,
 >(opts: CreateHermesClientOptions): HermesClient<R>;
 
+/** Derive a route table type from a HermesHandler instance. */
+export type RoutesOf<H> = H extends HermesHandler<infer M> ? Routes<M> : never;
+
 /** Convenience: derive a HermesClient type from a HermesHandler instance. */
-export type ClientOf<H> = H extends HermesHandler<infer M> ? HermesClient<Routes<M>> : never;
+export type ClientOf<H> = H extends HermesHandler<any> ? HermesClient<RoutesOf<H>> : never;
 
 // ============================================================================
 // Transferables (zero-copy postMessage payloads)

@@ -27,12 +27,13 @@
 // The wire shape is the contract; the class is one implementation of it.
 
 import { parseWireResponse } from "./internal/wire.js";
+import { toErrorString } from "./internal/errors.js";
 
 /**
  * @typedef {Object} HermesClientRequest
  * @property {string} type
  * @property {any} [payload]
- * @property {number} [timeoutMs]  Per-call override of the client default. 0 disables.
+ * @property {number} [timeoutMs]  Per-call override. Non-positive or non-finite numbers disable the timeout.
  * @property {AbortSignal} [signal]
  * @property {Transferable[]} [transfer]
  *   Transferable objects inside `payload` (ArrayBuffers, MessagePorts,
@@ -57,7 +58,7 @@ import { parseWireResponse } from "./internal/wire.js";
 
 /**
  * @typedef {Object} CreateHermesClientOptions
- * @property {(msg: any, transfer?: Transferable[]) => void} send
+ * @property {(msg: any, transfer?: Transferable[]) => void | PromiseLike<void>} send
  *   Called once per dispatch. Fire-and-forget; replies arrive via `subscribe`.
  *   Throwing here resolves the dispatch with an error envelope (does not throw).
  *   The second argument carries the request's transfer list when one was
@@ -98,12 +99,23 @@ function defaultIdGen() {
  * @param {CreateHermesClientOptions} opts
  * @returns {HermesClient}
  */
-export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, idGen = defaultIdGen }) {
+export function createHermesClient(opts) {
+    if (!opts || typeof opts !== "object" || Array.isArray(opts)) {
+        throw new TypeError("createHermesClient: options must be an object");
+    }
+
+    const { send, subscribe, defaultTimeoutMs = 5000, idGen = defaultIdGen } = opts;
     if (typeof send !== "function") {
         throw new TypeError("createHermesClient: `send` must be a function");
     }
     if (typeof subscribe !== "function") {
         throw new TypeError("createHermesClient: `subscribe` must be a function");
+    }
+    if (typeof defaultTimeoutMs !== "number") {
+        throw new TypeError("createHermesClient: `defaultTimeoutMs` must be a number");
+    }
+    if (typeof idGen !== "function") {
+        throw new TypeError("createHermesClient: `idGen` must be a function");
     }
 
     /** @type {Map<string, { onWireResponse: (msg: any) => void, close: () => void }>} */
@@ -134,30 +146,49 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
     let unsubscribeTransport = subscribe((msg) => {
         if (closed || !msg || typeof msg !== "object") return;
 
-        if (typeof msg.requestId === "string") {
-            const entry = pending.get(msg.requestId);
+        let requestId;
+        try { requestId = msg.requestId; } catch { return; }
+        if (typeof requestId === "string") {
+            const entry = pending.get(requestId);
             if (entry) entry.onWireResponse(msg);
             return;
         }
 
-        if (typeof msg.type === "string") {
-            const handlers = broadcastHandlers.get(msg.type);
-            if (handlers) {
+        let type;
+        try { type = msg.type; } catch { return; }
+        if (typeof type === "string") {
+            const handlers = broadcastHandlers.get(type);
+            if (handlers && handlers.size > 0) {
+                let payload;
+                try { payload = msg.payload; } catch { return; }
                 for (const h of handlers) {
-                    try { h(msg.payload, msg); } catch { /* swallow per-handler */ }
+                    try { h(payload, msg); } catch { /* swallow per-handler */ }
                 }
             }
         }
     });
 
+    if (typeof unsubscribeTransport !== "function") {
+        throw new TypeError("createHermesClient: `subscribe` must return an unsubscribe function");
+    }
     /**
      * @param {HermesClientRequest} [req]
      * @returns {Promise<HermesClientResponse<any>>}
      */
     function dispatch(req) {
-        const { type, payload, timeoutMs, signal, transfer } = req || /** @type {HermesClientRequest} */ ({});
-
         if (closed) return Promise.resolve(closedResponse());
+
+        let request;
+        let type;
+        try {
+            request = req || /** @type {HermesClientRequest} */ ({});
+            type = request.type;
+        } catch (err) {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: `Hermes client: request fields could not be read (${toErrorString(err)})`,
+            }));
+        }
 
         if (typeof type !== "string" || type.length === 0) {
             return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
@@ -166,12 +197,34 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
             }));
         }
 
+        let payload;
+        let timeoutMs;
+        let signal;
+        let transfer;
+        try {
+            payload = request.payload;
+            timeoutMs = request.timeoutMs;
+            signal = request.signal;
+            transfer = request.transfer;
+        } catch (err) {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: `Hermes client: request fields could not be read (${toErrorString(err)})`,
+            }));
+        }
+
+        if (timeoutMs != null && typeof timeoutMs !== "number") {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: "Hermes client: request.timeoutMs must be a number",
+            }));
+        }
         return new Promise((resolve) => {
             let requestId;
             try {
                 requestId = idGen();
             } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
+                const message = toErrorString(err);
                 resolve({
                     ok: false,
                     error: `Hermes client: requestId generation failed (${message})`,
@@ -212,7 +265,10 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
                 settled = true;
                 pending.delete(requestId);
                 if (timeoutHandle !== null) clearTimeout(timeoutHandle);
-                if (signal && signalHandler) signal.removeEventListener("abort", signalHandler);
+                if (signal && signalHandler) {
+                    try { signal.removeEventListener("abort", signalHandler); }
+                    catch { /* cleanup failure must not prevent settlement */ }
+                }
                 resolve(response);
             };
 
@@ -237,25 +293,43 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
             }
 
             if (signal) {
-                if (signal.aborted) {
-                    settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                try {
+                    if (signal.aborted) {
+                        settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                        return;
+                    }
+                    signalHandler = () => {
+                        settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                    };
+                    signal.addEventListener("abort", signalHandler, { once: true });
+                } catch (err) {
+                    settle({
+                        ok: false,
+                        error: `Hermes client: AbortSignal setup failed (${toErrorString(err)})`,
+                        info: { requestId, type },
+                    });
                     return;
                 }
-                signalHandler = () => {
-                    settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
-                };
-                signal.addEventListener("abort", signalHandler, { once: true });
             }
+            if (settled) return;
 
-            try {
-                send({ type, payload, requestId }, transfer);
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
+            const onSendFailure = (err) => {
+                const message = toErrorString(err);
                 settle({
                     ok: false,
                     error: `Hermes client: send failed (${message})`,
                     info: { requestId, type },
                 });
+            };
+
+            try {
+                const sendResult = send({ type, payload, requestId }, transfer);
+                if (sendResult !== undefined) {
+                    const observed = Promise.resolve(sendResult);
+                    Promise.prototype.then.call(observed, undefined, onSendFailure);
+                }
+            } catch (err) {
+                onSendFailure(err);
             }
         });
     }

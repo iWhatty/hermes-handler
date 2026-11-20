@@ -62,7 +62,7 @@
     "lint": "eslint .",
     "test": "vitest run && pnpm run test:types && pnpm run test:package",
     "test:types": "tsc -p tsconfig.test-types.json",
-    "test:package": "pnpm run build && node scripts/check-package-exports.mjs",
+    "test:package": "pnpm run build && node scripts/check-package-exports.mjs && node scripts/check-public-exports.mjs && tsc -p tsconfig.test-package.json",
     "prepublishOnly": "pnpm test"
   },
   "devDependencies": {

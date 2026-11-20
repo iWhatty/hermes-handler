@@ -10,8 +10,8 @@ import {
     createHermesClient,
     type ClientOf,
     type HermesResponse,
-    type HermesClient,
     type Routes,
+    type RoutesOf,
 } from "../src/index.js";
 
 // ============================================================================
@@ -72,7 +72,7 @@ async function checkClient() {
     };
     // ClientOf<typeof hermes> — derives the route table from the handler
     // map automatically. Use the explicit Client alias to verify.
-    const dispatch = createHermesClient<Client extends HermesClient<infer R> ? R : never>(transport);
+    const dispatch = createHermesClient<RoutesOf<typeof hermes>>(transport);
 
     // Known type with correct payload — response typed
     const r1 = await dispatch({ type: "make-num", payload: { n: 4 } });

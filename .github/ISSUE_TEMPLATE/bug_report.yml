@@ -1,0 +1,60 @@
+name: Bug report
+description: Report reproducible incorrect behavior in HermesHandler
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve HermesHandler. Please remove private data from reproductions.
+        For suspected vulnerabilities, stop here and follow the private instructions in [SECURITY.md](https://github.com/iWhatty/hermes-handler/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: 1.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Chrome extension
+        - Firefox extension
+        - Browser window
+        - Web Worker or Service Worker
+        - Node.js
+        - Other JavaScript runtime
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include expected behavior and the smallest reproducible example.
+    validations:
+      required: true
+  - type: textarea
+    id: transport
+    attributes:
+      label: Transport and configuration
+      description: Include the import path, adapter, timeout, ownership, and relevant options.
+  - type: textarea
+    id: verification
+    attributes:
+      label: Reproduction steps
+      description: List exact commands or steps and whether the issue reproduces on the latest release.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: This report contains no credentials or private application data.
+          required: true
+        - label: This is not a security vulnerability requiring private disclosure.
+          required: true

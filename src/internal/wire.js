@@ -28,19 +28,31 @@
  * @returns {HermesClientEnvelope}
  */
 export function parseWireResponse(msg, ctx = {}) {
-    if (msg && msg.ok === true) {
-        /** @type {HermesClientOk} */
-        const r = { ok: true };
-        if ("result" in msg) r.result = msg.result;
-        if (msg.info !== undefined) r.info = msg.info;
-        return r;
+    try {
+        const ok = msg && msg.ok;
+        if (ok === true) {
+            /** @type {HermesClientOk} */
+            const r = { ok: true };
+            if ("result" in msg) r.result = msg.result;
+            const info = msg.info;
+            if (info !== undefined) r.info = info;
+            return r;
+        }
+        if (ok === false) {
+            const error = msg.error;
+            if (typeof error === "string") {
+                /** @type {HermesClientErr} */
+                const r = { ok: false, error };
+                const info = msg.info;
+                if (info !== undefined) r.info = info;
+                return r;
+            }
+        }
+    } catch {
+        // A malformed object may expose throwing getters/proxy traps. Treat it
+        // like any other shape violation so correlated requests still settle.
     }
-    if (msg && msg.ok === false && typeof msg.error === "string") {
-        /** @type {HermesClientErr} */
-        const r = { ok: false, error: msg.error };
-        if (msg.info !== undefined) r.info = msg.info;
-        return r;
-    }
+
     return {
         ok: false,
         error: "Hermes client: malformed response from server",

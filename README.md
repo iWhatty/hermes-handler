@@ -420,6 +420,13 @@ hermes-handler enforces a predictable and deterministic runtime contract. By sta
 
 ### Project docs
 
+- [Architecture and compatibility invariants](ARCHITECTURE.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Transport guide](docs/TRANSPORTS.md)
+- [TypeScript guide](docs/TYPESCRIPT.md)
+- [Examples](examples/README.md)
+- [Codex/Windows tooling jank log](docs/CODEX_JANK_LOG.md)
 - [Publishing checklist](docs/PUBLISHING.md)
 - [Roadmap and API direction](docs/ROADMAP.md)
 

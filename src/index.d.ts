@@ -32,6 +32,7 @@ export {
     HermesClientTransport,
     CreateHermesClientOptions,
     createHermesClient,
+    RoutesOf,
     ClientOf,
     getTransferList,
     setTransferList,

@@ -271,6 +271,90 @@ describe("servePostMessage", () => {
         expect(serverPort.posted).toEqual([]);
     });
 
+    it("converts synchronous dispatch throws into correlated errors", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => { throw new Error("sync failure"); },
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "sync-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: false,
+            error: "servePostMessage: dispatch threw (sync failure)",
+            requestId: "sync-request",
+        });
+    });
+
+    it("converts rejected dispatch promises into correlated errors", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => Promise.reject(new Error("async failure")),
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "async-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: false,
+            error: "servePostMessage: dispatch rejected (async failure)",
+            requestId: "async-request",
+        });
+    });
+
+    it("consumes rejected fire-and-forget dispatches without replying", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        const dispatch = vi.fn(() => Promise.reject(new Error("ignored failure")));
+        servePostMessage({ dispatch }, serverPort);
+
+        clientPort.postMessage({ type: "note" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(serverPort.posted).toEqual([]);
+    });
+
+    it("stamps missing correlation without losing response transfers", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        const buffer = new ArrayBuffer(16);
+        const envelope = Object.freeze({ ok: true, result: { buffer } });
+        setTransferList(envelope, [buffer]);
+        servePostMessage({ dispatch: () => envelope }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "transfer-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const posted = serverPort.posted[0];
+        expect(posted.msg).toEqual({
+            ok: true,
+            result: { buffer },
+            requestId: "transfer-request",
+        });
+        expect(posted.transfer).toEqual([buffer]);
+        expect(getTransferList(posted.msg)).toEqual([buffer]);
+        expect("requestId" in envelope).toBe(false);
+    });
+
+    it("never overrides an explicit response requestId", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => ({
+                ok: true,
+                result: "done",
+                requestId: "response-request",
+            }),
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "inbound-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: true,
+            result: "done",
+            requestId: "response-request",
+        });
+    });
     it("validates its arguments", () => {
         const [port] = endpointPair();
         expect(() => servePostMessage({}, port)).toThrow(TypeError);

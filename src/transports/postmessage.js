@@ -46,7 +46,26 @@
  */
 
 import { defineTransport } from "./_base.js";
-import { getTransferList } from "../internal/transfer.js";
+import { getTransferList, setTransferList } from "../internal/transfer.js";
+
+/**
+ * Attach and activate a MessagePort-shaped endpoint transactionally. If setup
+ * fails, remove the newly-added listener and preserve the original error even
+ * when rollback also fails.
+ * @param {any} endpoint
+ * @param {(event: any) => void} listener
+ * @returns {() => void}
+ */
+function subscribeToMessages(endpoint, listener) {
+    try {
+        endpoint.addEventListener("message", listener);
+        if (typeof endpoint.start === "function") endpoint.start();
+    } catch (setupError) {
+        try { endpoint.removeEventListener("message", listener); } catch { /* preserve setupError */ }
+        throw setupError;
+    }
+    return () => endpoint.removeEventListener("message", listener);
+}
 
 /**
  * @param {any} target  Window, MessagePort, Worker, or anything with postMessage + addEventListener.
@@ -110,11 +129,9 @@ export function postMessageTransport(target, opts = {}) {
                 handler(canonical);
             }
         };
-        target.addEventListener("message", listener);
         // MessagePort only begins dispatching addEventListener listeners after
         // start(). Window and Worker-style endpoints do not expose it.
-        if (typeof target.start === "function") target.start();
-        return () => target.removeEventListener("message", listener);
+        return subscribeToMessages(target, listener);
     };
 
     return defineTransport("postMessageTransport", { send, subscribe });
@@ -221,12 +238,40 @@ export function servePostMessage(hermes, endpoint, opts = {}) {
             return canonical;
         })();
 
-        const p = hermes.dispatch(msg, { endpoint, event });
-        if (msg.requestId === undefined) return; // fire-and-forget
+        let dispatchPromise;
+        try {
+            dispatchPromise = Promise.resolve(hermes.dispatch(msg, { endpoint, event }));
+        } catch (err) {
+            if (msg.requestId !== undefined) {
+                reply({
+                    ok: false,
+                    error: `servePostMessage: dispatch threw (${err instanceof Error ? err.message : String(err)})`,
+                    requestId: msg.requestId,
+                }, []);
+            }
+            return;
+        }
 
-        p.then((envelope) => {
-            reply(envelope, getTransferList(envelope));
-        }).catch((err) => {
+        if (msg.requestId === undefined) {
+            // Dispatch still runs for fire-and-forget messages, but any
+            // rejection belongs to the serving boundary and must be consumed.
+            dispatchPromise.catch(() => {});
+            return;
+        }
+
+        dispatchPromise.then((envelope) => {
+            let correlated = envelope;
+            if (
+                envelope &&
+                typeof envelope === "object" &&
+                !("requestId" in envelope)
+            ) {
+                const transfer = getTransferList(envelope);
+                correlated = { ...envelope, requestId: msg.requestId };
+                setTransferList(correlated, transfer);
+            }
+            reply(correlated, getTransferList(correlated));
+        }, (err) => {
             // Defensive: HermesHandler.dispatch resolves error envelopes
             // rather than rejecting, but a dispatch-shaped stand-in might not.
             reply({
@@ -237,9 +282,7 @@ export function servePostMessage(hermes, endpoint, opts = {}) {
         });
     };
 
-    endpoint.addEventListener("message", listener);
     // See postMessageTransport.subscribe(): real MessagePorts need explicit
     // activation when their listeners were registered with addEventListener.
-    if (typeof endpoint.start === "function") endpoint.start();
-    return () => endpoint.removeEventListener("message", listener);
+    return subscribeToMessages(endpoint, listener);
 }

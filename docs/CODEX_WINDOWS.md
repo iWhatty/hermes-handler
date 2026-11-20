@@ -2,6 +2,8 @@
 
 This repo is often worked on from Codex Desktop on Windows with PowerShell. These notes are here to save future agents from losing time to shell and package-manager quirks.
 
+For exact sandbox, patching, RTK, PowerShell, and subagent failures observed in a real implementation session, see [CODEX_JANK_LOG.md](CODEX_JANK_LOG.md).
+
 ## Package Manager
 
 - Use pnpm through Corepack: `corepack pnpm <command>`.
