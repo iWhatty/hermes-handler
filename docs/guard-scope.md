@@ -1,7 +1,61 @@
 # Scope: `hermes-handler/guard`
 
 Status: the owner approved the recommended options on 2026-11-15. The guard is
-built in 1.2.0 (unpublished); no extension has migrated yet.
+in the unpublished 1.2.0 candidate. The extension pilots ran in isolated
+copies. Consumers have yet to adopt the guard.
+
+## Candidate verification and browser handoff
+
+All three pilots used `hermes-handler-1.2.0.tgz` packed from `e8f21f9` on
+`codex/messaging-hardening`. Its SHA-256 is
+`656019c162a691a4023867fe29a5401d94eebf6f2cfb27dbaf507b4478c223cc`.
+
+The prepared release archive has SHA-256
+`23a17b3f34851df9f7a27e89299572c8195dc14ec9cf71b777f77ae87327caec`.
+Only `README.md` changed in the archive to clarify the gate return values.
+The runtime files, declarations, and manifest are byte-identical, so the
+WebRadar browser evidence still applies. Use the prepared archive for the
+remaining browser checks and verify its hash before building either extension.
+
+| Consumer | Proven in the pilot | Remaining browser evidence |
+| --- | --- | --- |
+| WebRadar (`7cca256`) | Chromium exercised six runtime routes. The native toolbar popup supplied no `sender.tab`; an explicit tab ID reached the intended session, and missing and malformed IDs received no response. | Covered for this candidate. |
+| Helios (`d89556ba`) | The background-only guard pilot preserved sender policy, the refusal and unknown-route envelopes, and `runtime_handler_timeout`. The Node suite reported 7,845 passes and four existing TODOs. Chromium and Firefox package checks passed. | One targeted live check run through the operator's approved Lab installation and bridge. |
+| SpellBolt (`df732170`) | The installed 1.1.1 baseline and packed 1.2.0 matched the representative 1.x replies. The guard matched 424 refusal cases and 424 dispatch cases. The current esbuild/Terser release build and Chrome and Firefox package checks passed. | One targeted run through SpellBolt's approved managed Chromium launcher. |
+
+### Helios operator check
+
+The operator arranges an approved Lab build using the packed candidate and
+runs the check in an already-open Lab profile. Record which artifact is
+installed before using the live bridge or extension self-test. Helios keeps
+browser launches and installed-extension changes under its operator workflow.
+
+- Exercise an extension-only request from an allowed extension page and an
+  own-content request such as `CONTENT_READY` from its allowed sender.
+- Check that a refused sender receives `runtime_sender_rejected` with the
+  expected `info.code`, `info.type`, and request ID when supplied.
+- Check the standard unknown-route response and a controlled handler timeout.
+  The timeout reply carries `runtime_handler_timeout`. The internal dev bridge
+  keeps its separate direct-call path.
+
+### SpellBolt managed Chromium check
+
+Get approval for the specific browser run under SpellBolt's testing doctrine.
+Use its seeded launcher and an isolated profile, with one targeted run and
+local fixtures. Keep provider calls and personal account data out of the run.
+
+- Exercise a page spellcheck request and an extension-only popup request.
+  Verify that an unknown route, a refused sender, and a held feature are
+  handled in that order. `SENDER_REFUSED` and `FEATURE_HELD` stay top-level.
+  Pre-dispatch refusals omit `requestId`, while dispatched replies echo it
+  when supplied.
+- Exercise an invalid payload or a controlled readiness timeout. In the
+  release build, `ENHANCE_TEXT_STREAM` continues through its separate port
+  check and returns the held-feature refusal without opening a provider call.
+
+For each remaining check, record the app revision, candidate hash, browser
+and profile, cases exercised, actual replies, and cleanup result. Keep the
+pilot copies separate from the source checkouts.
 
 ## Summary
 
@@ -19,14 +73,14 @@ or default changes. Measured cost is 0.6 KB gzip in a content script and
 1.0 KB gzip for all three exports.
 
 Recommended adoption order: WebRadar, then Helios, then SpellBolt. SpellBolt
-can only adopt after moving from hermes-handler 0.0.3 to 1.x, which is the
-largest piece of the whole effort.
+has since completed its Hermes `0.0.3` to `1.1.1` upgrade. See the candidate
+verification above for current pilot status.
 
 No `broadcastToTabs` helper. See "Left out".
 
-## State of this checkout
+## Checkout at the time of scoping
 
-This working copy is at `f1eab10` (package version 1.1.0), a detached HEAD four
+The working copy was at `f1eab10` (package version 1.1.0), a detached HEAD four
 commits behind `origin/main` at `09e9f7d` (1.1.1, published). The source
 differences between the two are comments and three lines in `src/client.js`;
 nothing the guard touches. Every file and line reference below is to
@@ -350,14 +404,12 @@ warning. Separately, `HermesHandler` still defaults `logger` to `console`
 (`:438`); changing that default is a major-version change under the roadmap and
 is out of scope. The migration notes pass `logger: null` in release builds.
 
-**Closure Compiler.** SpellBolt depends on `google-closure-compiler-js`
-(`SpellBolt-ChromeExt/package.json:77`). The guard never derives a wire value
-from a property name, never looks a boundary up by a string key, and takes
-rules keyed by computed wire-value keys (`[T.X]: {...}`), which Closure does
-not rename. Rule field names (`from`, `timeoutMs`, `port`) are read by the
-guard as unquoted properties, so under ADVANCED optimisation the guard source
-and the rule tables must be compiled together, or the package needs an externs
-file. This needs one real SpellBolt build to confirm; see open questions.
+**Closure Compiler.** The original scope considered a Closure-based SpellBolt
+build. The pilot verified the current esbuild/Terser release build. The guard
+uses computed wire values as rule keys and reads rule fields such as `from`,
+`timeoutMs`, and `port` as unquoted properties. If a future build uses Closure
+ADVANCED optimisation, compile the guard and rule tables together or supply
+an externs file for those fields.
 
 **Safari sender shape.** Covered by step 3 of `classifySender`, and by a test
 with a sender that has a url and no tab.
@@ -418,11 +470,11 @@ package.
   (`runtimeMessageMiddleware.js`) that predates its use of `hermes.use`. It can
   stay; folding it into `hermes.use` is optional and separate.
 
-### SpellBolt (`^0.0.3`), last
+### SpellBolt, last
 
-The guard cannot be adopted before the upgrade: it ships inside
-hermes-handler 1.2.0, and `pair()` emits `{ handler, timeoutMs }` entries that
-0.0.3 rejects (per-handler config arrived in 0.0.7, middleware in 0.2.0).
+SpellBolt now depends on `^1.1.1`. The prior `0.0.3` upgrade was a prerequisite
+because the guard ships in 1.2.0 and `pair()` emits `{ handler, timeoutMs }`
+entries that 0.0.3 rejects.
 
 What the upgrade involves, from running the installed 0.0.3 and 1.1.1 side by
 side on thirteen handler return shapes:
@@ -540,11 +592,8 @@ if the owner wants esbuild as a dev dependency (open question 6).
 8. **WebRadar's stricter page check:** keep `pageUrl()` in WebRadar
    (recommended), or add a `pageProtocols` option to `classifySender`.
 
-## Open questions
+## Open questions from the original scope
 
-- Does SpellBolt's Closure build run ADVANCED on dependency code? If the guard
-  is compiled separately from the rule tables, the rule field names need an
-  externs file or quoted access. One trial build answers this.
 - Which callers actually send WebRadar's five `RUNTIME` messages other than
   `SETTINGS_MUTATE`? The `from` rows above are placeholders.
 - How should Helios split `RuntimeMessages` across its five routers, and should

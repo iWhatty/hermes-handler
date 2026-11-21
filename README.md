@@ -249,7 +249,7 @@ hermes.use(guard.middleware);
 
 - `defineBoundary` throws at start-up on duplicate or empty names and when `rules` does not have exactly one row per name. `pair()` throws when a handler is missing or undeclared, and turns a rule's `timeoutMs` into a `{ handler, timeoutMs }` entry. `owns` fits the `shouldHandle` option.
 - `classifySender` returns `'extension'`, `'extension:<page>'`, `'page'` or `null`. `from: 'extension'` also accepts named pages; a `null` kind is always refused. `trusted: 'extension'` lets your own pages, named or not, send every message; it is off by default.
-- Refusals are `{ ok: false, error, info: { code, type } }` with `code` `UNKNOWN_TYPE` or `SENDER_REFUSED`. An optional `gate(rule, info)` runs after both checks. It returns `null` to let the message through or its own refusal with `ok: false`; any other return value throws. Put a gate refusal's code in `info` when it goes through the middleware, because `HermesHandler` moves other keys there and logs a warning.
+- Refusals are `{ ok: false, error, info: { code, type } }` with `code` `UNKNOWN_TYPE` or `SENDER_REFUSED`. An optional `gate(rule, info)` runs after both checks. It can return `null` or `undefined` to allow the message, or its own refusal with `ok: false`. Other return values throw. Put a gate refusal's code in `info` when it goes through the middleware, because `HermesHandler` moves other keys there and logs a warning.
 - The guard never reads `msg.payload` and logs nothing.
 
 ### Half-and-half: server router + tiny client
