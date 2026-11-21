@@ -82,7 +82,97 @@ describe("createHermesClient", () => {
 
         expect(res).toEqual({ ok: false, error: "kaboom", info: { code: 7 } });
     });
+    it.each([
+        ["non-boolean ok", { ok: "yes" }],
+        ["missing error", { ok: false }],
+        ["non-string error", { ok: false, error: 42 }],
+    ])("settles a correlated %s response as malformed", async (_label, malformed) => {
+        const subscribers = new Set();
+        let received;
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                received = { ...malformed, requestId: msg.requestId };
+                for (const handler of subscribers) handler(received);
+            },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            idGen: () => "malformed-id",
+        });
 
+        const response = await dispatch({ type: "malformed" });
+
+        expect(response).toEqual({
+            ok: false,
+            error: "Hermes client: malformed response from server",
+            info: {
+                received,
+                requestId: "malformed-id",
+            },
+        });
+    });
+
+    it.each(["ok", "result", "info", "error"])(
+        "settles a correlated response with a throwing %s getter as malformed",
+        async (field) => {
+            const subscribers = new Set();
+            let received;
+            const dispatch = createHermesClient({
+                send: (msg) => {
+                    received = { requestId: msg.requestId };
+                    if (field !== "ok") received.ok = field === "error" ? false : true;
+                    Object.defineProperty(received, field, {
+                        enumerable: true,
+                        get: () => { throw new Error(field + " getter failed"); },
+                    });
+                    for (const handler of subscribers) handler(received);
+                },
+                subscribe: (handler) => {
+                    subscribers.add(handler);
+                    return () => subscribers.delete(handler);
+                },
+                idGen: () => "throwing-field-id",
+            });
+
+            const response = await dispatch({ type: "malformed" });
+
+            expect(response).toMatchObject({
+                ok: false,
+                error: "Hermes client: malformed response from server",
+                info: { requestId: "throwing-field-id" },
+            });
+            expect(response.info.received).toBe(received);
+        }
+    );
+
+
+    it("reads a correlated response requestId only once", async () => {
+        let deliver = () => {};
+        let requestIdReads = 0;
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                const response = { ok: true, result: "pong" };
+                Object.defineProperty(response, "requestId", {
+                    get: () => {
+                        requestIdReads += 1;
+                        if (requestIdReads > 1) throw new Error("requestId read twice");
+                        return msg.requestId;
+                    },
+                });
+                deliver(response);
+            },
+            subscribe: (handler) => {
+                deliver = handler;
+                return () => {};
+            },
+            idGen: () => "single-read-id",
+        });
+
+        await expect(dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+        expect(requestIdReads).toBe(1);
+        dispatch.close();
+    });
     it("integrates cleanly with a real HermesHandler server preserving canonical error info", async () => {
         const { send, subscribe } = loopback({
             boom: () => ({ ok: false, error: "kaboom", info: { code: 7 } }),
@@ -210,6 +300,101 @@ describe("createHermesClient", () => {
         expect(res.error).toMatch(/transport blew up/);
     });
 
+    it("a rejected async send resolves the dispatch with a correlated error envelope", async () => {
+        const dispatch = createHermesClient({
+            send: () => Promise.reject(new Error("async transport failed")),
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "async-send-id",
+        });
+
+        await expect(dispatch({ type: "echo" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: send failed (async transport failed)",
+            info: { requestId: "async-send-id", type: "echo" },
+        });
+        dispatch.close();
+    });
+
+    it("consumes an async send rejection whose reason cannot be stringified", async () => {
+        const hostileReason = new Proxy({}, {
+            get: () => { throw new Error("get trap failed"); },
+            has: () => { throw new Error("has trap failed"); },
+        });
+        const dispatch = createHermesClient({
+            send: () => Promise.reject(hostileReason),
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "hostile-rejection-id",
+        });
+
+        await expect(dispatch({ type: "echo" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: send failed (Unknown error)",
+            info: { requestId: "hostile-rejection-id", type: "echo" },
+        });
+        dispatch.close();
+    });
+
+    it("consumes an async rejection from an Error with a non-string message", async () => {
+        const hostileError = new Error();
+        hostileError.message = Symbol("not-stringifiable-as-error-message");
+        const dispatch = createHermesClient({
+            send: () => Promise.reject(hostileError),
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "hostile-error-id",
+        });
+
+        await expect(dispatch({ type: "echo" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: send failed (Unknown error)",
+            info: { requestId: "hostile-error-id", type: "echo" },
+        });
+        dispatch.close();
+    });
+
+    it("observes a rejected Promise whose own then getter throws", async () => {
+        const rejected = Promise.reject(new Error("original rejection"));
+        Object.defineProperty(rejected, "then", {
+            get: () => { throw new Error("poisoned then getter"); },
+        });
+        const dispatch = createHermesClient({
+            send: () => rejected,
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "poisoned-promise-id",
+        });
+
+        await expect(dispatch({ type: "echo" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: send failed (original rejection)",
+            info: { requestId: "poisoned-promise-id", type: "echo" },
+        });
+        dispatch.close();
+    });
+
+    it("keeps a correlated response when the async send rejects afterward", async () => {
+        const subscribers = new Set();
+        const dispatch = createHermesClient({
+            send: (msg) => {
+                for (const handler of subscribers) {
+                    handler({ ok: true, result: "pong", requestId: msg.requestId });
+                }
+                return Promise.reject(new Error("late transport failure"));
+            },
+            subscribe: (handler) => {
+                subscribers.add(handler);
+                return () => subscribers.delete(handler);
+            },
+            defaultTimeoutMs: 0,
+            idGen: () => "response-wins-id",
+        });
+
+        await expect(dispatch({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+        dispatch.close();
+    });
+
     it("rejects an empty type with a clear error envelope", async () => {
         const dispatch = createHermesClient({
             send: vi.fn(),
@@ -220,6 +405,123 @@ describe("createHermesClient", () => {
 
         expect(res.ok).toBe(false);
         expect(res.error).toMatch(/non-empty string/i);
+    });
+
+    it.each(["type", "payload", "timeoutMs", "signal", "transfer"])(
+        "contains a throwing %s request getter in an error envelope",
+        async (field) => {
+            const send = vi.fn();
+            const request = { type: "ping" };
+            Object.defineProperty(request, field, {
+                get: () => { throw new Error(field + " getter failed"); },
+            });
+            const dispatch = createHermesClient({ send, subscribe: () => () => {} });
+
+            await expect(dispatch(request)).resolves.toMatchObject({
+                ok: false,
+                error: expect.stringContaining("request fields could not be read"),
+            });
+            expect(send).not.toHaveBeenCalled();
+            dispatch.close();
+        },
+    );
+
+    it("contains a revoked request proxy in an error envelope", async () => {
+        const send = vi.fn();
+        const revocable = Proxy.revocable({ type: "ping" }, {});
+        revocable.revoke();
+        const dispatch = createHermesClient({ send, subscribe: () => () => {} });
+
+        await expect(dispatch(revocable.proxy)).resolves.toMatchObject({
+            ok: false,
+            error: expect.stringContaining("request fields could not be read"),
+        });
+        expect(send).not.toHaveBeenCalled();
+        dispatch.close();
+    });
+
+    it.each(["10", Symbol("timeout")])(
+        "rejects malformed per-call timeout value %s before sending",
+        async (timeoutMs) => {
+            const send = vi.fn();
+            const dispatch = createHermesClient({ send, subscribe: () => () => {} });
+
+            await expect(dispatch({ type: "ping", timeoutMs })).resolves.toEqual({
+                ok: false,
+                error: "Hermes client: request.timeoutMs must be a number",
+            });
+            expect(send).not.toHaveBeenCalled();
+            dispatch.close();
+        },
+    );
+
+    it.each([
+        ["aborted getter", () => ({
+            get aborted() { throw new Error("aborted getter failed"); },
+            addEventListener: () => {},
+            removeEventListener: () => {},
+        })],
+        ["addEventListener", () => ({
+            aborted: false,
+            addEventListener: () => { throw new Error("add failed"); },
+            removeEventListener: () => {},
+        })],
+    ])("settles a correlated error when AbortSignal %s throws", async (_label, makeSignal) => {
+        const send = vi.fn();
+        const dispatch = createHermesClient({
+            send,
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "signal-setup-id",
+        });
+
+        await expect(dispatch({ type: "ping", signal: makeSignal() })).resolves.toEqual({
+            ok: false,
+            error: expect.stringContaining("AbortSignal setup failed"),
+            info: { requestId: "signal-setup-id", type: "ping" },
+        });
+        expect(send).not.toHaveBeenCalled();
+        dispatch.close();
+    });
+
+    it("does not send when addEventListener aborts synchronously", async () => {
+        const send = vi.fn();
+        const signal = {
+            aborted: false,
+            addEventListener: (_type, handler) => handler(),
+            removeEventListener: vi.fn(),
+        };
+        const dispatch = createHermesClient({
+            send,
+            subscribe: () => () => {},
+            defaultTimeoutMs: 0,
+            idGen: () => "sync-abort-id",
+        });
+
+        await expect(dispatch({ type: "ping", signal })).resolves.toEqual({
+            ok: false,
+            error: "Aborted",
+            info: { aborted: true, requestId: "sync-abort-id" },
+        });
+        expect(send).not.toHaveBeenCalled();
+        dispatch.close();
+    });
+
+    it("settles a response even when AbortSignal cleanup throws", async () => {
+        let deliver = () => {};
+        const signal = {
+            aborted: false,
+            addEventListener: () => {},
+            removeEventListener: () => { throw new Error("remove failed"); },
+        };
+        const dispatch = createHermesClient({
+            send: (msg) => deliver({ ok: true, result: "pong", requestId: msg.requestId }),
+            subscribe: (handler) => { deliver = handler; return () => {}; },
+            idGen: () => "cleanup-id",
+        });
+
+        await expect(dispatch({ type: "ping", signal })).resolves.toEqual({ ok: true, result: "pong" });
+        dispatch.close();
     });
 
     it("uses a custom idGen when provided", async () => {
@@ -261,6 +563,27 @@ describe("createHermesClient", () => {
             info: { type: "echo" },
         });
         expect(send).not.toHaveBeenCalled();
+    });
+
+    it("contains an idGen throw whose reason cannot be stringified", async () => {
+        const hostileReason = new Proxy({}, {
+            get: () => { throw new Error("get failed"); },
+            has: () => { throw new Error("has failed"); },
+        });
+        const send = vi.fn();
+        const dispatch = createHermesClient({
+            send,
+            subscribe: () => () => {},
+            idGen: () => { throw hostileReason; },
+        });
+
+        await expect(dispatch({ type: "echo" })).resolves.toEqual({
+            ok: false,
+            error: "Hermes client: requestId generation failed (Unknown error)",
+            info: { type: "echo" },
+        });
+        expect(send).not.toHaveBeenCalled();
+        dispatch.close();
     });
 
     it("does not overwrite a pending dispatch when idGen returns a duplicate ID", async () => {
@@ -345,27 +668,53 @@ describe("createHermesClient", () => {
         dispatch.close();
     });
 
-    it.each([NaN, Infinity, -1, 0])("disables non-positive or non-finite default timeouts (%s)", async (defaultTimeoutMs) => {
+    it.each([NaN, Infinity, -Infinity, -1, 0])("disables non-positive or non-finite client timeouts (%s)", async (timeoutMs) => {
         vi.useFakeTimers();
-        const dispatch = createHermesClient({
+        const transport = {
             send: () => {},
             subscribe: () => () => {},
-            defaultTimeoutMs,
-        });
+        };
+        const withDefault = createHermesClient({ ...transport, defaultTimeoutMs: timeoutMs });
+        const withOverride = createHermesClient(transport);
         try {
-            const pending = dispatch({ type: "hang" });
+            const fromDefault = withDefault({ type: "hang" });
+            const fromOverride = withOverride({ type: "hang", timeoutMs });
             expect(vi.getTimerCount()).toBe(0);
-            dispatch.close();
-            await expect(pending).resolves.toMatchObject({ ok: false, info: { closed: true } });
+            withDefault.close();
+            withOverride.close();
+            await expect(fromDefault).resolves.toMatchObject({ ok: false, info: { closed: true } });
+            await expect(fromOverride).resolves.toMatchObject({ ok: false, info: { closed: true } });
         } finally {
-            dispatch.close();
+            withDefault.close();
+            withOverride.close();
             vi.useRealTimers();
         }
     });
 
     it("throws synchronously on factory misuse", () => {
+        expect(() => createHermesClient(null)).toThrow(/options must be an object/);
+        expect(() => createHermesClient([])).toThrow(/options must be an object/);
         expect(() => createHermesClient({ subscribe: () => () => { } })).toThrow(/send/);
         expect(() => createHermesClient({ send: () => { } })).toThrow(/subscribe/);
+
+        const transport = {
+            send: () => {},
+            subscribe: () => () => {},
+        };
+        expect(() => createHermesClient({ ...transport, defaultTimeoutMs: "10" })).toThrow(
+            /defaultTimeoutMs.*must be a number/,
+        );
+
+        expect(() => createHermesClient({ ...transport, idGen: null })).toThrow(/idGen.*function/);
+        expect(() => createHermesClient({
+            send: () => {},
+            subscribe: () => null,
+        })).toThrow(/subscribe.*unsubscribe function/);
+
+        const zeroTimeout = createHermesClient({ ...transport, defaultTimeoutMs: 0 });
+        const negativeTimeout = createHermesClient({ ...transport, defaultTimeoutMs: -1 });
+        zeroTimeout.close();
+        negativeTimeout.close();
     });
 
     // ------------------------------------------------------------
@@ -402,6 +751,52 @@ describe("createHermesClient", () => {
 
             expect(fps).toEqual([{ v: 60 }, { v: 30 }]);
             expect(css).toEqual([{ selector: "#x" }]);
+        });
+
+        it("reads broadcast type and payload only once", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+            const seen = [];
+            let typeReads = 0;
+            let payloadReads = 0;
+            dispatch.on("evt", (payload) => seen.push(["a", payload]));
+            dispatch.on("evt", (payload) => seen.push(["b", payload]));
+            const wire = {};
+            Object.defineProperty(wire, "type", {
+                get: () => {
+                    typeReads += 1;
+                    if (typeReads > 1) throw new Error("type read twice");
+                    return "evt";
+                },
+            });
+            Object.defineProperty(wire, "payload", {
+                get: () => {
+                    payloadReads += 1;
+                    if (payloadReads > 1) throw new Error("payload read twice");
+                    return 42;
+                },
+            });
+
+            expect(() => transport.emit(wire)).not.toThrow();
+            expect(seen).toEqual([["a", 42], ["b", 42]]);
+            expect(typeReads).toBe(1);
+            expect(payloadReads).toBe(1);
+            dispatch.close();
+        });
+
+        it("contains throwing inbound requestId, type, and payload getters", () => {
+            const transport = makeFanout();
+            const dispatch = createHermesClient(transport);
+            dispatch.on("evt", () => {});
+
+            for (const field of ["requestId", "type", "payload"]) {
+                const wire = { type: "evt" };
+                Object.defineProperty(wire, field, {
+                    get: () => { throw new Error(`${field} getter failed`); },
+                });
+                expect(() => transport.emit(wire)).not.toThrow();
+            }
+            dispatch.close();
         });
 
         it("ignores broadcasts for unsubscribed types silently", () => {
@@ -549,6 +944,25 @@ describe("createHermesClient", () => {
                 info: { closed: true },
             });
             expect(send).toHaveBeenCalledTimes(1);
+        });
+
+        it("does not inspect request fields after close", async () => {
+            let getterCalls = 0;
+            const send = vi.fn();
+            const dispatch = createHermesClient({ send, subscribe: () => () => {} });
+            const request = {};
+            Object.defineProperty(request, "type", {
+                get: () => { getterCalls += 1; throw new Error("type failed"); },
+            });
+            dispatch.close();
+
+            await expect(dispatch(request)).resolves.toEqual({
+                ok: false,
+                error: "Hermes client: client is closed",
+                info: { closed: true },
+            });
+            expect(getterCalls).toBe(0);
+            expect(send).not.toHaveBeenCalled();
         });
 
         it(".on() is a no-op after close while preserving its unsubscribe contract", () => {

@@ -111,6 +111,41 @@ describe("postMessageTransport worker-shaped events", () => {
 });
 
 describe("postMessageTransport transfer forwarding", () => {
+    it("keeps the target origin and transfer list in the Window argument positions", async () => {
+        const endpoint = {
+            location: {},
+            document: {},
+            postMessage: vi.fn(),
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+        };
+        const targetOrigin = "https://example.test";
+        const request = { type: "op", requestId: "r1" };
+        const transfer = [new ArrayBuffer(8)];
+        const transport = postMessageTransport(endpoint, { targetOrigin });
+        transport.send(request, []);
+        transport.send(request, transfer);
+        expect(endpoint.postMessage.mock.calls).toStrictEqual([
+            [request, targetOrigin],
+            [request, targetOrigin, transfer],
+        ]);
+
+        const response = { ok: true, result: transfer[0], requestId: "r1" };
+        setTransferList(response, transfer);
+        const stop = servePostMessage({ dispatch: () => response }, endpoint, { targetOrigin });
+        try {
+            const posted = new Promise((resolve) => endpoint.postMessage.mockImplementationOnce(resolve));
+            const [, listener] = endpoint.addEventListener.mock.calls[0];
+            listener({ data: request });
+            await posted;
+
+            expect(endpoint.postMessage).toHaveBeenLastCalledWith(response, targetOrigin, transfer);
+            expect(endpoint.postMessage.mock.contexts).toEqual([endpoint, endpoint, endpoint]);
+        } finally {
+            stop();
+        }
+    });
+
     it("passes the transfer list to a port-style target", () => {
         const [port] = endpointPair();
         const transport = postMessageTransport(port);
@@ -271,6 +306,90 @@ describe("servePostMessage", () => {
         expect(serverPort.posted).toEqual([]);
     });
 
+    it("converts synchronous dispatch throws into correlated errors", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => { throw new Error("sync failure"); },
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "sync-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: false,
+            error: "servePostMessage: dispatch threw (sync failure)",
+            requestId: "sync-request",
+        });
+    });
+
+    it("converts rejected dispatch promises into correlated errors", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => Promise.reject(new Error("async failure")),
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "async-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: false,
+            error: "servePostMessage: dispatch rejected (async failure)",
+            requestId: "async-request",
+        });
+    });
+
+    it("consumes rejected fire-and-forget dispatches without replying", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        const dispatch = vi.fn(() => Promise.reject(new Error("ignored failure")));
+        servePostMessage({ dispatch }, serverPort);
+
+        clientPort.postMessage({ type: "note" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(serverPort.posted).toEqual([]);
+    });
+
+    it("stamps missing correlation without losing response transfers", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        const buffer = new ArrayBuffer(16);
+        const envelope = Object.freeze({ ok: true, result: { buffer } });
+        setTransferList(envelope, [buffer]);
+        servePostMessage({ dispatch: () => envelope }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "transfer-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const posted = serverPort.posted[0];
+        expect(posted.msg).toEqual({
+            ok: true,
+            result: { buffer },
+            requestId: "transfer-request",
+        });
+        expect(posted.transfer).toEqual([buffer]);
+        expect(getTransferList(posted.msg)).toEqual([buffer]);
+        expect("requestId" in envelope).toBe(false);
+    });
+
+    it("never overrides an explicit response requestId", async () => {
+        const [serverPort, clientPort] = endpointPair();
+        servePostMessage({
+            dispatch: () => ({
+                ok: true,
+                result: "done",
+                requestId: "response-request",
+            }),
+        }, serverPort);
+
+        clientPort.postMessage({ type: "op", requestId: "inbound-request" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(serverPort.posted[0].msg).toEqual({
+            ok: true,
+            result: "done",
+            requestId: "response-request",
+        });
+    });
     it("validates its arguments", () => {
         const [port] = endpointPair();
         expect(() => servePostMessage({}, port)).toThrow(TypeError);

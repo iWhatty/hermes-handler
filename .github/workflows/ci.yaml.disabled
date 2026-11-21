@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [18.x, 24.x]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test package contract
+        run: pnpm test
+
+      - name: Check public runtime exports
+        run: node scripts/check-public-exports.mjs
+
+      - name: Check public TypeScript consumers
+        run: pnpm exec tsc -p tsconfig.test-package.json
+
+      - name: Check example syntax
+        run: node scripts/check-examples.mjs
+
+      - name: Check TypeScript example
+        run: pnpm exec tsc -p examples/typescript/tsconfig.json
+
+      - name: Check documentation links
+        run: node scripts/check-doc-links.mjs
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Inspect package contents
+        run: pnpm pack --dry-run

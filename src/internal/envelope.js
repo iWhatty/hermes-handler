@@ -15,6 +15,9 @@
 // client PARSES incoming responses (wire shape → typed envelope for
 // the dispatch resolver).
 
+import { getTransferList, setTransferList } from "./transfer.js";
+import { safeLog } from "./errors.js";
+
 // ============================================================================
 // Canonical key sets
 // ============================================================================
@@ -219,7 +222,7 @@ export function normalizePayload(payload, logger = null) {
         if ("requestId" in payload) errOut.requestId = payload.requestId;
         if (info !== undefined) {
             if (extraKeys.length > 0) {
-                logger?.warn?.("[Hermes] ok:false response contained extra fields; preserved in info", {
+                safeLog(logger, "warn", "[Hermes] ok:false response contained extra fields; preserved in info", {
                     extraKeys
                 });
             }
@@ -241,7 +244,7 @@ export function normalizePayload(payload, logger = null) {
         if (info !== undefined) {
             const extraKeys = Object.keys(collectExtraFields(payload, HERMES_KEYS_SUCCESS) ?? {});
             if (extraKeys.length > 0) {
-                logger?.warn?.("[Hermes] ok:true response contained extra fields; preserved in info", {
+                safeLog(logger, "warn", "[Hermes] ok:true response contained extra fields; preserved in info", {
                     extraKeys
                 });
             }
@@ -260,7 +263,7 @@ export function normalizePayload(payload, logger = null) {
     const info = collectSuccessShorthandInfo(payload);
     if (info !== undefined) {
         if ("error" in payload && payload.error !== undefined) {
-            logger?.warn?.("[Hermes] ok:true response contained error field; preserved in info");
+            safeLog(logger, "warn", "[Hermes] ok:true response contained error field; preserved in info");
         }
         out.info = info;
     }
@@ -287,14 +290,22 @@ export function normalizePayload(payload, logger = null) {
  * @param {string | undefined} [requestId]
  */
 export function freezeNormalized(payload, logger = null, requestId = undefined) {
-    const normalized = normalizePayload(payload, logger);
+    let normalized = normalizePayload(payload, logger);
     if (
         normalized &&
         typeof normalized === "object" &&
         requestId !== undefined &&
         !("requestId" in normalized)
     ) {
-        /** @type {any} */ (normalized).requestId = requestId;
+        if (!Object.isExtensible(normalized)) {
+            const transfer = getTransferList(normalized);
+            const stamped = { ...normalized, requestId };
+            markNormalized(stamped);
+            setTransferList(stamped, transfer);
+            normalized = stamped;
+        } else {
+            /** @type {any} */ (normalized).requestId = requestId;
+        }
     }
     return normalized && typeof normalized === "object"
         ? Object.freeze(normalized)

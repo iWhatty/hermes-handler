@@ -1,18 +1,10 @@
-// src/internal/timeout.js
-//
-// Promise-with-timeout primitive shared across the router. `ms <= 0`
-// or non-finite values disable the timeout entirely (handler runs
-// untimed, just awaited).
-//
-// The client (`createHermesClient`) does NOT use this helper because
-// its timeout lifecycle is intermingled with the dispatch settle/
-// abort/unsubscribe state machine — refactoring it into a shared
-// helper would tangle three different cleanup concerns.
+// The router bounds one handler invocation here. The client owns its timer
+// alongside the abort listener and pending request in its settlement path.
 
 /**
  * Run `fn` with an optional ms-bounded timeout. If the timeout fires
  * before `fn` resolves, the returned Promise rejects with
- * `onTimeout()`. If `ms` is 0 or non-finite, no timeout is imposed.
+ * `onTimeout()`. Non-positive and non-finite durations disable the timer.
  *
  * @template T
  * @param {() => T | Promise<T>} fn

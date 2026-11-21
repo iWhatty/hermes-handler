@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose an additive improvement or new use case
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe the developer problem before proposing an API.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behavior
+      description: Include a small usage example when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain how applications solve this today and why a package-level primitive helps.
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      options:
+        - Additive and backward-compatible
+        - Changes existing behavior or defaults
+        - Unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Project principles
+      options:
+        - label: The proposal can keep the runtime dependency-free.
+        - label: The proposal preserves the Hermes wire envelope.
+        - label: The proposal is useful beyond one application.

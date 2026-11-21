@@ -203,6 +203,12 @@ export type HermesClientRequest<R, K extends string = string> = {
 };
 
 export type HermesClientTransport = {
+    /**
+     * Send one wire message. Return values are ignored. The runtime also
+     * observes returned thenables so rejected asynchronous sends become error
+     * envelopes, while this contextual `void` return keeps existing
+     * fire-and-forget transports compatible.
+     */
     send: (msg: { type: string; payload?: unknown; requestId: string }, transfer?: Transferable[]) => void;
     subscribe: (handler: (msg: unknown) => void) => () => void;
 };
@@ -212,7 +218,10 @@ export type CreateHermesClientOptions = HermesClientTransport & {
     idGen?: () => string;
 };
 
-/** A typed client. Callable as `dispatch(req)`; also carries `.on` / `.off` / `.close`. */
+/**
+ * A typed client callable as `dispatch(req)`, with `on`, `off`, and `close`
+ * methods. Dispatch uses the wire request ID before returning the parsed reply.
+ */
 export interface HermesClient<R extends Record<string, { request: unknown; response: unknown }>> {
     <K extends keyof R & string>(
         req: HermesClientRequest<R[K]['request'], K>,
@@ -236,8 +245,11 @@ export function createHermesClient<
     R extends Record<string, { request: unknown; response: unknown }> = Record<string, { request: unknown; response: unknown }>,
 >(opts: CreateHermesClientOptions): HermesClient<R>;
 
+/** Derive a route table type from a HermesHandler instance. */
+export type RoutesOf<H> = H extends HermesHandler<infer M> ? Routes<M> : never;
+
 /** Convenience: derive a HermesClient type from a HermesHandler instance. */
-export type ClientOf<H> = H extends HermesHandler<infer M> ? HermesClient<Routes<M>> : never;
+export type ClientOf<H> = H extends HermesHandler<any> ? HermesClient<RoutesOf<H>> : never;
 
 // ============================================================================
 // Transferables (zero-copy postMessage payloads)

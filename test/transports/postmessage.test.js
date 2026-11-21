@@ -73,6 +73,38 @@ describe("postMessageTransport", () => {
         }
     });
 
+    it.each([
+        ["postMessageTransport", (endpoint) => postMessageTransport(endpoint).subscribe(() => {})],
+        ["servePostMessage", (endpoint) => servePostMessage({ dispatch: () => Promise.resolve({ ok: true }) }, endpoint)],
+    ])("rolls back %s listeners when setup throws and preserves the original error", (_label, subscribe) => {
+        for (const setupStage of ["add", "start"]) {
+            for (const rollbackThrows of [false, true]) {
+                const listeners = new Set();
+                const setupError = new Error(`${setupStage} failed`);
+                const endpoint = {
+                    postMessage() {},
+                    addEventListener(_type, listener) {
+                        listeners.add(listener);
+                        if (setupStage === "add") throw setupError;
+                    },
+                    removeEventListener(_type, listener) {
+                        listeners.delete(listener);
+                        if (rollbackThrows) throw new Error("rollback failed");
+                    },
+                    start() {
+                        if (setupStage === "start") throw setupError;
+                    },
+                };
+
+                let thrown;
+                try { subscribe(endpoint); } catch (err) { thrown = err; }
+
+                expect(thrown).toBe(setupError);
+                expect(listeners.size).toBe(0);
+            }
+        }
+    });
+
     it("activates real MessagePort endpoints for a full client/server round-trip", async () => {
         const { port1: serverPort, port2: clientPort } = new MessageChannel();
         const originalServerStart = serverPort.start.bind(serverPort);

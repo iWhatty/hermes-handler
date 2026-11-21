@@ -1,5 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { HermesHandler } from "../src/HermesHandler.js";
+import { getTransferList } from "../src/internal/transfer.js";
+
+async function withAbortController(Controller, run) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "AbortController");
+    Object.defineProperty(globalThis, "AbortController", {
+        configurable: true,
+        writable: true,
+        value: Controller,
+    });
+    try {
+        return await run();
+    } finally {
+        if (descriptor) Object.defineProperty(globalThis, "AbortController", descriptor);
+        else delete globalThis.AbortController;
+    }
+}
 
 describe("HermesHandler", () => {
     it("registerMany adds functions and config entries and overwrites existing handlers", async () => {
@@ -247,6 +263,86 @@ describe("HermesHandler", () => {
         expect(res.error).toMatch(/Unknown msg\.type/);
     });
 
+    it("treats an inaccessible requestId as absent without rejecting dispatch", async () => {
+        const msg = { type: "ping" };
+        Object.defineProperty(msg, "requestId", { get: () => { throw new Error("requestId failed"); } });
+        const hermes = new HermesHandler({ ping: () => "pong" });
+
+        await expect(hermes.dispatch(msg))
+            .resolves.toEqual({ ok: true, result: "pong" });
+    });
+
+    it("treats an inaccessible type as missing while preserving correlation", async () => {
+        const msg = { requestId: "hostile-type-id" };
+        Object.defineProperty(msg, "type", { get: () => { throw new Error("type failed"); } });
+        const hermes = new HermesHandler({ ping: () => "pong" });
+
+        await expect(hermes.dispatch(msg)).resolves.toEqual({
+            ok: false,
+            error: "Invalid message: msg missing string 'type'",
+            requestId: "hostile-type-id",
+        });
+    });
+
+    it("contains revoked message proxies at the direct dispatch boundary", async () => {
+        const revocable = Proxy.revocable({ type: "ping" }, {});
+        revocable.revoke();
+        const hermes = new HermesHandler({ ping: () => "pong" });
+
+        await expect(hermes.dispatch(revocable.proxy)).resolves.toEqual({
+            ok: false,
+            error: "Invalid message: msg missing string 'type'",
+        });
+    });
+
+    it.each([
+        ["a throwing sender.tab getter", () => {
+            const sender = {};
+            Object.defineProperty(sender, "tab", { get: () => { throw new Error("tab failed"); } });
+            return sender;
+        }],
+        ["a throwing sender.tab.id getter", () => {
+            const tab = {};
+            Object.defineProperty(tab, "id", { get: () => { throw new Error("id failed"); } });
+            return { tab };
+        }],
+        ["a revoked sender proxy", () => {
+            const revocable = Proxy.revocable({ tab: { id: 42 } }, {});
+            revocable.revoke();
+            return revocable.proxy;
+        }],
+    ])("contains %s while preserving the raw sender", async (_name, createSender) => {
+        const sender = createSender();
+        let receivedSender;
+        const hermes = new HermesHandler({
+            ping: (_payload, ctx) => {
+                receivedSender = ctx.sender;
+                expect(ctx.tabId).toBeUndefined();
+                return "pong";
+            },
+        });
+
+        await expect(hermes.dispatch({ type: "ping" }, sender))
+            .resolves.toEqual({ ok: true, result: "pong" });
+        expect(receivedSender).toBe(sender);
+    });
+
+    it("preserves ordinary derived sender tab IDs", async () => {
+        const sender = { tab: { id: 42 } };
+        const hermes = new HermesHandler({ ping: (_payload, ctx) => ctx.tabId });
+
+        await expect(hermes.dispatch({ type: "ping" }, sender))
+            .resolves.toEqual({ ok: true, result: 42 });
+    });
+
+    it("preserves tab ID derivation for legacy direct _dispatch callers", async () => {
+        const sender = { tab: { id: 43 } };
+        const hermes = new HermesHandler({ ping: (_payload, ctx) => ctx.tabId });
+
+        await expect(hermes._dispatch({ type: "ping" }, sender))
+            .resolves.toEqual({ ok: true, result: 43 });
+    });
+
     // ------------------------------------------------------------
     // Timeout Handling
     // ------------------------------------------------------------
@@ -339,6 +435,68 @@ describe("HermesHandler", () => {
         expect(listener({ payload: "missing-type" }, {}, sendResponse)).toBe(false);
     });
 
+    it("does not derive sender metadata before listener ownership is accepted", () => {
+        let tabReads = 0;
+        const sender = {};
+        Object.defineProperty(sender, "tab", {
+            get: () => {
+                tabReads += 1;
+                throw new Error("tab should not be read");
+            },
+        });
+        const hermes = new HermesHandler(
+            { ping: () => "pong" },
+            {
+                shouldHandle: (_msg, receivedSender) => {
+                    expect(receivedSender).toBe(sender);
+                    return false;
+                },
+            }
+        );
+
+        expect(hermes.getListener()({ type: "ping" }, sender)).toBe(false);
+        expect(tabReads).toBe(0);
+    });
+
+    it("contains hostile sender metadata in promise-style listeners", async () => {
+        const sender = {};
+        Object.defineProperty(sender, "tab", { get: () => { throw new Error("tab failed"); } });
+        const hermes = new HermesHandler({
+            ping: (_payload, ctx) => ({ sameSender: ctx.sender === sender, tabId: ctx.tabId }),
+        });
+
+        await expect(hermes.getListener()({ type: "ping" }, sender)).resolves.toEqual({
+            ok: true,
+            result: { sameSender: true, tabId: undefined },
+        });
+    });
+
+    it("declines listener ownership when the type getter throws", () => {
+        const hermes = new HermesHandler({ ping: () => "pong" }, { ignoreUnknown: true });
+        const listener = hermes.getListener();
+        const msg = {};
+        Object.defineProperty(msg, "type", { get: () => { throw new Error("type failed"); } });
+
+        expect(() => listener(msg)).not.toThrow();
+        expect(listener(msg)).toBe(false);
+    });
+
+    it("uses one validated type snapshot across listener ownership and dispatch", async () => {
+        let typeReads = 0;
+        const msg = {};
+        Object.defineProperty(msg, "type", {
+            get: () => {
+                typeReads += 1;
+                if (typeReads > 1) throw new Error("type read twice");
+                return "ping";
+            },
+        });
+        const hermes = new HermesHandler({ ping: () => "pong" }, { ignoreUnknown: true });
+
+        await expect(hermes.getListener()(msg)).resolves.toEqual({ ok: true, result: "pong" });
+        expect(typeReads).toBe(1);
+    });
+
     it("claims known types when ignoreUnknown is enabled", async () => {
         const hermes = new HermesHandler(
             {
@@ -369,6 +527,72 @@ describe("HermesHandler", () => {
             error: "Unknown msg.type: unknown"
         });
         await expect(listener({ type: "ping" })).resolves.toEqual({ ok: true, result: "pong" });
+    });
+    it("declines ownership when shouldHandle throws without affecting direct dispatch", async () => {
+        let handlerCalls = 0;
+        let logCalls = 0;
+        const hermes = new HermesHandler(
+            {
+                ping: () => {
+                    handlerCalls += 1;
+                    return "pong";
+                },
+            },
+            {
+                shouldHandle: () => { throw new Error("ownership failed"); },
+                logger: {
+                    error: () => {
+                        logCalls += 1;
+                        throw new Error("logger failed");
+                    },
+                },
+            }
+        );
+        const listener = hermes.getListener();
+        let responseCalls = 0;
+
+        expect(listener(
+            { type: "ping" },
+            {},
+            () => { responseCalls += 1; }
+        )).toBe(false);
+        expect(handlerCalls).toBe(0);
+        expect(responseCalls).toBe(0);
+        expect(logCalls).toBe(1);
+
+        await expect(hermes.dispatch({ type: "ping" }))
+            .resolves.toEqual({ ok: true, result: "pong" });
+        expect(handlerCalls).toBe(1);
+    });
+
+    it("delivers callback-style responses exactly once", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" }, { logger: null });
+        const listener = hermes.getListener();
+        let responseCalls = 0;
+
+        const response = await new Promise((resolve) => {
+            expect(listener({ type: "ping" }, {}, (payload) => {
+                responseCalls += 1;
+                resolve(payload);
+            })).toBe(true);
+        });
+
+        expect(response).toEqual({ ok: true, result: "pong" });
+        expect(responseCalls).toBe(1);
+    });
+
+    it("consumes a throwing sendResponse callback without retrying it", async () => {
+        const hermes = new HermesHandler({ ping: () => "pong" }, { logger: null });
+        const listener = hermes.getListener();
+        let responseCalls = 0;
+
+        expect(listener({ type: "ping" }, {}, () => {
+            responseCalls += 1;
+            throw new Error("callback failed");
+        })).toBe(true);
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(responseCalls).toBe(1);
     });
 
     // ------------------------------------------------------------
@@ -483,6 +707,33 @@ describe("HermesHandler", () => {
         expect(() => new HermesHandler({ negative: { timeoutMs: -1, handler: () => {} } })).toThrow(/timeoutMs must be a non-negative/);
     });
 
+    it("rejects invalid route names at construction and registration", () => {
+        const handler = () => "ok";
+
+        expect(() => new HermesHandler({ "": handler })).toThrow(/route type must be a non-empty string/);
+
+        const hermes = new HermesHandler({});
+        expect(() => hermes.register("", handler)).toThrow(/route type must be a non-empty string/);
+        expect(() => hermes.register(42, handler)).toThrow(/route type must be a non-empty string/);
+        expect(() => hermes.registerMany({ "": handler })).toThrow(/route type must be a non-empty string/);
+    });
+
+    it("validates router factory options and accepts numeric timeout settings", () => {
+        expect(() => new HermesHandler(null)).toThrow(/initialHandlers must be an object map/);
+        expect(() => new HermesHandler([])).toThrow(/initialHandlers must be an object map/);
+        expect(() => new HermesHandler({}, null)).toThrow(/options must be an object/);
+
+        expect(() => new HermesHandler({}, { timeoutMs: "10" })).toThrow(/timeoutMs must be a number/);
+        for (const timeoutMs of [0, -1, NaN, Infinity, -Infinity]) {
+            expect(() => new HermesHandler({}, { timeoutMs, logger: null })).not.toThrow();
+        }
+
+        expect(() => new HermesHandler({}, { onUnknown: null })).toThrow(/onUnknown must be a function/);
+        expect(() => new HermesHandler({}, { onError: null })).toThrow(/onError must be a function/);
+        expect(() => new HermesHandler({}, { ignoreUnknown: "yes" })).toThrow(/ignoreUnknown must be a boolean/);
+        expect(() => new HermesHandler({}, { shouldHandle: true })).toThrow(/shouldHandle must be a function/);
+    });
+
     // ------------------------------------------------------------
     // Middleware pipeline (.use)
     // ------------------------------------------------------------
@@ -568,6 +819,67 @@ describe("HermesHandler", () => {
         expect(saw).toBe(true);
     });
 
+    it("keeps dispatch deterministic when AbortController construction throws", async () => {
+        class BrokenAbortController {
+            constructor() { throw new Error("controller failed"); }
+        }
+
+        await withAbortController(BrokenAbortController, async () => {
+            const hermes = new HermesHandler({
+                ping: (_msg, ctx) => ({ signal: ctx.signal }),
+            });
+            await expect(hermes.dispatch({ type: "ping", requestId: "constructor-id" }))
+                .resolves.toEqual({ ok: true, result: { signal: undefined }, requestId: "constructor-id" });
+        });
+    });
+
+    it("keeps dispatch deterministic when AbortController.signal throws", async () => {
+        class BrokenAbortController {
+            get signal() { throw new Error("signal failed"); }
+            abort() {}
+        }
+
+        await withAbortController(BrokenAbortController, async () => {
+            const hermes = new HermesHandler({
+                ping: (_msg, ctx) => ({ signal: ctx.signal }),
+            });
+            await expect(hermes.dispatch({ type: "ping", requestId: "signal-id" }))
+                .resolves.toEqual({ ok: true, result: { signal: undefined }, requestId: "signal-id" });
+        });
+    });
+
+    it("preserves a completed envelope when AbortController.abort throws", async () => {
+        class BrokenAbortController {
+            signal = {};
+            abort() { throw new Error("abort failed"); }
+        }
+
+        await withAbortController(BrokenAbortController, async () => {
+            const hermes = new HermesHandler({ ping: () => "pong" });
+            const response = await hermes.dispatch({ type: "ping", requestId: "abort-id" });
+            expect(response).toEqual({ ok: true, result: "pong", requestId: "abort-id" });
+            expect(Object.isFrozen(response)).toBe(true);
+        });
+    });
+
+    it("preserves healthy AbortController signal and cleanup behavior", async () => {
+        const signal = {};
+        let abortCalls = 0;
+        class HealthyAbortController {
+            constructor() { this.signal = signal; }
+            abort() { abortCalls += 1; }
+        }
+
+        await withAbortController(HealthyAbortController, async () => {
+            const hermes = new HermesHandler({
+                ping: (_msg, ctx) => ctx.signal === signal,
+            });
+            await expect(hermes.dispatch({ type: "ping" }))
+                .resolves.toEqual({ ok: true, result: true });
+            expect(abortCalls).toBe(1);
+        });
+    });
+
     it("middleware can guard unknown types before they reach onUnknown", async () => {
         const hermes = new HermesHandler({ ping: () => "pong" });
         hermes.use(async (msg, _c, next) => {
@@ -594,5 +906,249 @@ describe("HermesHandler", () => {
         const hermes = new HermesHandler({});
         expect(() => hermes.use(null)).toThrow(/must be a function/);
         expect(() => hermes.use(42)).toThrow(/must be a function/);
+    });
+    it("falls back to a canonical correlated error when onError throws", async () => {
+        const hermes = new HermesHandler(
+            { fail: () => { throw new Error("handler failed"); } },
+            {
+                logger: null,
+                onError: () => { throw new Error("error hook failed"); },
+            }
+        );
+
+        const response = await hermes.dispatch({ type: "fail", requestId: "handler-request" });
+
+        expect(response).toEqual({
+            ok: false,
+            error: "handler failed",
+            requestId: "handler-request",
+        });
+        expect(Object.isFrozen(response)).toBe(true);
+    });
+
+    it("handles a throwing onError hook for middleware failures", async () => {
+        const hermes = new HermesHandler(
+            { ping: () => "pong" },
+            {
+                logger: null,
+                onError: () => { throw new Error("error hook failed"); },
+            }
+        );
+        hermes.use(() => { throw new Error("middleware failed"); });
+
+        await expect(hermes.dispatch({ type: "ping", requestId: "middleware-request" }))
+            .resolves.toEqual({
+                ok: false,
+                error: "middleware failed",
+                requestId: "middleware-request",
+            });
+    });
+
+    it("defends the callback listener error path from a throwing onError hook", async () => {
+        const hermes = new HermesHandler(
+            {},
+            {
+                logger: null,
+                onError: () => { throw new Error("error hook failed"); },
+            }
+        );
+        hermes._dispatch = () => Promise.reject(new Error("listener failed"));
+        const listener = hermes.getListener();
+
+        const responsePromise = new Promise((resolve) => {
+            expect(listener(
+                { type: "fail", requestId: "listener-request" },
+                {},
+                resolve
+            )).toBe(true);
+        });
+        const response = await responsePromise;
+
+        expect(response).toEqual({
+            ok: false,
+            error: "listener failed",
+            requestId: "listener-request",
+        });
+        expect(Object.isFrozen(response)).toBe(true);
+    });
+
+    it("contains an inaccessible requestId during callback listener recovery", async () => {
+        const hermes = new HermesHandler({}, { logger: null });
+        hermes._dispatch = () => Promise.reject(new Error("listener failed"));
+        const listener = hermes.getListener();
+        const msg = { type: "fail" };
+        Object.defineProperty(msg, "requestId", { get: () => { throw new Error("requestId failed"); } });
+
+        const response = await new Promise((resolve) => {
+            expect(listener(msg, {}, resolve)).toBe(true);
+        });
+
+        expect(response).toEqual({ ok: false, error: "listener failed" });
+        expect(Object.isFrozen(response)).toBe(true);
+    });
+
+    it("contains hostile sender metadata during callback listener recovery", async () => {
+        const sender = {};
+        Object.defineProperty(sender, "tab", { get: () => { throw new Error("tab failed"); } });
+        const hermes = new HermesHandler({}, { logger: null });
+        hermes._dispatch = () => Promise.reject(new Error("listener failed"));
+        const listener = hermes.getListener();
+
+        const response = await new Promise((resolve) => {
+            expect(listener({ type: "fail", requestId: "sender-request" }, sender, resolve)).toBe(true);
+        });
+
+        expect(response).toEqual({
+            ok: false,
+            error: "listener failed",
+            requestId: "sender-request",
+        });
+        expect(Object.isFrozen(response)).toBe(true);
+    });
+
+    it("preserves an explicit requestId returned by onError", async () => {
+        const hermes = new HermesHandler(
+            { fail: () => { throw new Error("handler failed"); } },
+            {
+                logger: null,
+                onError: () => ({ ok: false, error: "custom", requestId: "hook-request" }),
+            }
+        );
+
+        await expect(hermes.dispatch({ type: "fail", requestId: "inbound-request" }))
+            .resolves.toEqual({
+                ok: false,
+                error: "custom",
+                requestId: "hook-request",
+            });
+    });
+
+    it("clones a frozen normalized envelope before adding correlation", async () => {
+        const buffer = new ArrayBuffer(8);
+        const source = new HermesHandler({
+            ping: (_msg, ctx) => {
+                ctx.transfer(buffer);
+                return "pong";
+            },
+        }, { logger: null });
+        const frozen = await source.dispatch({ type: "ping" });
+        const relay = new HermesHandler({ relay: () => frozen }, { logger: null });
+
+        const response = await relay.dispatch({ type: "relay", requestId: "relay-request" });
+
+        expect(response).toEqual({
+            ok: true,
+            result: "pong",
+            requestId: "relay-request",
+        });
+        expect(getTransferList(response)).toEqual([buffer]);
+        expect(Object.isFrozen(response)).toBe(true);
+        expect(frozen).toEqual({ ok: true, result: "pong" });
+        expect("requestId" in frozen).toBe(false);
+    });
+
+    it.each([
+        [
+            "ok:false extras",
+            { ok: false, error: "nope", diagnostics: { inspected: 1 } },
+            { ok: false, error: "nope", info: { diagnostics: { inspected: 1 } }, requestId: "warn-id" },
+        ],
+        [
+            "ok:true result extras",
+            { ok: true, result: "yes", diagnostics: { inspected: 1 } },
+            { ok: true, result: "yes", info: { diagnostics: { inspected: 1 } }, requestId: "warn-id" },
+        ],
+        [
+            "ok:true shorthand error",
+            { ok: true, value: 1, error: "diagnostic" },
+            { ok: true, result: { value: 1 }, info: { error: "diagnostic" }, requestId: "warn-id" },
+        ],
+    ])("preserves normalized %s responses when logger.warn throws", async (_label, payload, expected) => {
+        const hermes = new HermesHandler(
+            { route: () => payload },
+            { logger: { warn: () => { throw new Error("logger failed"); } } },
+        );
+
+        const response = await hermes.dispatch({ type: "route", requestId: "warn-id" });
+
+        expect(response).toEqual(expected);
+        expect(Object.isFrozen(response)).toBe(true);
+    });
+
+    it("contains a throwing logger.warn getter during normalization", async () => {
+        const logger = {};
+        Object.defineProperty(logger, "warn", { get: () => { throw new Error("warn getter failed"); } });
+        const hermes = new HermesHandler(
+            { route: () => ({ ok: true, result: "yes", diagnostics: { inspected: 1 } }) },
+            { logger },
+        );
+
+        await expect(hermes.dispatch({ type: "route" })).resolves.toEqual({
+            ok: true,
+            result: "yes",
+            info: { diagnostics: { inspected: 1 } },
+        });
+    });
+
+    it("preserves handler error envelopes when logger.error throws", async () => {
+        const hermes = new HermesHandler(
+            { fail: () => { throw new Error("handler failed"); } },
+            { logger: { error: () => { throw new Error("logger failed"); } } },
+        );
+
+        await expect(hermes.dispatch({ type: "fail", requestId: "handler-id" })).resolves.toEqual({
+            ok: false,
+            error: "handler failed",
+            requestId: "handler-id",
+        });
+    });
+
+    it("preserves middleware error envelopes when logger.error throws", async () => {
+        const hermes = new HermesHandler(
+            { ping: () => "pong" },
+            { logger: { error: () => { throw new Error("logger failed"); } } },
+        );
+        hermes.use(() => { throw new Error("middleware failed"); });
+
+        await expect(hermes.dispatch({ type: "ping", requestId: "middleware-id" })).resolves.toEqual({
+            ok: false,
+            error: "middleware failed",
+            requestId: "middleware-id",
+        });
+    });
+
+    it("keeps the first ctx.send response when duplicate-send logging throws", async () => {
+        const hermes = new HermesHandler(
+            {
+                multi: (_msg, ctx) => {
+                    ctx.send("first");
+                    ctx.send("second");
+                },
+            },
+            { logger: { warn: () => { throw new Error("logger failed"); } } },
+        );
+
+        await expect(hermes.dispatch({ type: "multi" })).resolves.toEqual({ ok: true, result: "first" });
+    });
+
+    it("keeps healthy logger receiver and warning arguments", async () => {
+        const calls = [];
+        const logger = {
+            warn(...args) {
+                expect(this).toBe(logger);
+                calls.push(args);
+            },
+        };
+        const hermes = new HermesHandler(
+            { route: () => ({ ok: true, result: "yes", diagnostics: { inspected: 1 } }) },
+            { logger },
+        );
+
+        await hermes.dispatch({ type: "route" });
+
+        expect(calls).toEqual([[
+            "[Hermes] ok:true response contained extra fields; preserved in info",
+            { extraKeys: ["diagnostics"] },
+        ]]);
     });
 });

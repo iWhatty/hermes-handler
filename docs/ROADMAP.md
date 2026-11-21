@@ -13,20 +13,20 @@ HermesHandler is also a public npm package used by existing applications. Roadma
 ## Near-Term Hardening
 
 - Keep builds and package verification OS-agnostic across Windows, macOS, and Linux.
-- Test the built package entry points so runtime exports, declarations, and `package.json#exports` cannot drift apart.
-- Surface Chrome runtime send failures as correlated Hermes error envelopes instead of delayed client timeouts.
-- Make client shutdown terminal and idempotent: unsubscribe once, settle pending requests, and reject post-close dispatch without touching the transport.
-- Start `MessagePort` endpoints when required and cover the path with a real `MessageChannel` integration test.
+- Keep built-package entry-point tests aligned with runtime exports, declarations, and `package.json#exports`.
+- Keep Chrome runtime send failures surfaced as correlated Hermes error envelopes.
+- Preserve terminal, idempotent client shutdown and single-settlement cleanup.
+- Keep `MessagePort` startup covered by a real `MessageChannel` integration test.
 - Keep listener ownership controls focused: `ignoreUnknown` for common multi-listener extension pages, `shouldHandle` for scoped ownership rules.
-- Add more tests around callback-style `sendResponse`, thrown `shouldHandle` predicates, and malformed messages.
+- Keep callback-style `sendResponse`, thrown `shouldHandle` predicates, and malformed wire responses covered.
 - Keep direct `dispatch()` behavior deterministic for tests, non-extension runtimes, and adapters.
-- Add type-level examples once the public option surface settles.
+- Keep type-level examples compiled against the public package surface.
 
 The client lifecycle currently needs only an explicit `open`/`closed` state and shared settlement helpers. Introduce a larger state-machine abstraction only if future lifecycle states or transitions make the linear model genuinely hard to reason about.
 
 ## Developer Experience
 
-- Validate clearly invalid factory options and route names early with precise errors, while preserving documented `timeoutMs: 0` behavior.
+- Keep clearly invalid factory options and route names rejected early with precise errors, while preserving documented `timeoutMs: 0` behavior.
 - Keep source comments focused on local invariants; put longer tutorials and integration guidance in the README or dedicated docs.
 - Refactor the large dispatch implementation only after behavior tests lock down its semantics. Prefer small named helpers for message validation, context creation, route invocation, middleware composition, and response finalization.
 - Document that local client abort stops waiting but does not remotely cancel server work unless a transport-level cancellation protocol is added.

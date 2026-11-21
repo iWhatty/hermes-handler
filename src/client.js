@@ -1,38 +1,16 @@
-// src/client.js
-//
-// Lightweight client-side helper for the Hermes wire envelope.
-//
-// HermesHandler (the class in ./HermesHandler.js) is the **router** — what
-// you run on the side that owns the handlers (background SW, content
-// script, parent process, etc.).
-//
-// This module is the **client** — what you run on the side that sends a
-// request and parses the response envelope. It does not include any of
-// the routing, registration, or per-handler timeout machinery, so it is
-// dramatically smaller than the full class. Use this in page-world
-// bundles, popup bundles, or any context where every byte counts.
-//
-// The wire envelope is the contract:
-//
-//   dispatch request:    { type, payload?, requestId }
-//   dispatch response:   { ok: true,  result?, info?, requestId }
-//                        { ok: false, error,   info?, requestId }
-//   broadcast (server→client, no reply expected):
-//                        { type, payload? }     ← no requestId
-//
-// You provide the transport (`send` and `subscribe`); the client handles
-// requestId correlation for dispatches AND fans out broadcasts to
-// type-keyed subscribers registered via `.on(type, handler)`.
-//
-// The wire shape is the contract; the class is one implementation of it.
+// The client sends requests through a supplied transport and matches replies
+// by their wire requestId. Dispatch resolves to the parsed response envelope.
+// Messages without a requestId can reach type-based broadcast subscribers.
+// This entry point has no dependency on the router or its envelope producer.
 
 import { parseWireResponse } from "./internal/wire.js";
+import { toErrorString } from "./internal/errors.js";
 
 /**
  * @typedef {Object} HermesClientRequest
  * @property {string} type
  * @property {any} [payload]
- * @property {number} [timeoutMs]  Per-call override of the client default. 0 disables.
+ * @property {number} [timeoutMs]  Per-call override. Non-positive or non-finite numbers disable the timeout.
  * @property {AbortSignal} [signal]
  * @property {Transferable[]} [transfer]
  *   Transferable objects inside `payload` (ArrayBuffers, MessagePorts,
@@ -58,8 +36,8 @@ import { parseWireResponse } from "./internal/wire.js";
 /**
  * @typedef {Object} CreateHermesClientOptions
  * @property {(msg: any, transfer?: Transferable[]) => void} send
- *   Called once per dispatch. Fire-and-forget; replies arrive via `subscribe`.
- *   Throwing here resolves the dispatch with an error envelope (does not throw).
+ *   Sends the request. Replies arrive through `subscribe`. A synchronous throw
+ *   or a rejected thenable settles the request with an error envelope.
  *   The second argument carries the request's transfer list when one was
  *   provided; transports that can't transfer may ignore it.
  * @property {(handler: (msg: any) => void) => () => void} subscribe
@@ -98,12 +76,23 @@ function defaultIdGen() {
  * @param {CreateHermesClientOptions} opts
  * @returns {HermesClient}
  */
-export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, idGen = defaultIdGen }) {
+export function createHermesClient(opts) {
+    if (!opts || typeof opts !== "object" || Array.isArray(opts)) {
+        throw new TypeError("createHermesClient: options must be an object");
+    }
+
+    const { send, subscribe, defaultTimeoutMs = 5000, idGen = defaultIdGen } = opts;
     if (typeof send !== "function") {
         throw new TypeError("createHermesClient: `send` must be a function");
     }
     if (typeof subscribe !== "function") {
         throw new TypeError("createHermesClient: `subscribe` must be a function");
+    }
+    if (typeof defaultTimeoutMs !== "number") {
+        throw new TypeError("createHermesClient: `defaultTimeoutMs` must be a number");
+    }
+    if (typeof idGen !== "function") {
+        throw new TypeError("createHermesClient: `idGen` must be a function");
     }
 
     /** @type {Map<string, { onWireResponse: (msg: any) => void, close: () => void }>} */
@@ -119,45 +108,63 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
      * @returns {HermesClientResponse<any>}
      */
     const closedResponse = (info) => {
-        const response = /** @type {HermesClientResponse<any>} */ ({
+        return {
             ok: false,
             error: "Hermes client: client is closed",
-            info: { closed: true },
-        });
-        if (info) Object.assign(response.info, info);
-        return response;
+            info: { closed: true, ...info },
+        };
     };
 
-    // Single persistent transport subscription. Fans out by requestId (for
-    // dispatch responses) or by type (for broadcasts).
-    /** @type {(() => void)|null} */
-    let unsubscribeTransport = subscribe((msg) => {
+    /** @param {any} msg */
+    function onTransportMessage(msg) {
         if (closed || !msg || typeof msg !== "object") return;
 
-        if (typeof msg.requestId === "string") {
-            const entry = pending.get(msg.requestId);
-            if (entry) entry.onWireResponse(msg);
+        let requestId;
+        try { requestId = msg.requestId; } catch { return; }
+        if (typeof requestId === "string") {
+            // An unmatched reply can arrive after a timeout or abort.
+            pending.get(requestId)?.onWireResponse(msg);
             return;
         }
 
-        if (typeof msg.type === "string") {
-            const handlers = broadcastHandlers.get(msg.type);
-            if (handlers) {
-                for (const h of handlers) {
-                    try { h(msg.payload, msg); } catch { /* swallow per-handler */ }
-                }
-            }
+        let type;
+        try { type = msg.type; } catch { return; }
+        if (typeof type !== "string") return;
+
+        const handlers = broadcastHandlers.get(type);
+        if (!handlers?.size) return;
+
+        let payload;
+        try { payload = msg.payload; } catch { return; }
+        for (const handler of handlers) {
+            try { handler(payload, msg); } catch { /* Keep delivering to other subscribers. */ }
         }
-    });
+    }
+
+    /** @type {(() => void)|null} */
+    let unsubscribeTransport = subscribe(onTransportMessage);
+    if (typeof unsubscribeTransport !== "function") {
+        throw new TypeError("createHermesClient: `subscribe` must return an unsubscribe function");
+    }
 
     /**
      * @param {HermesClientRequest} [req]
      * @returns {Promise<HermesClientResponse<any>>}
      */
     function dispatch(req) {
-        const { type, payload, timeoutMs, signal, transfer } = req || /** @type {HermesClientRequest} */ ({});
-
         if (closed) return Promise.resolve(closedResponse());
+
+        let request;
+        let type;
+        try {
+            request = req || /** @type {HermesClientRequest} */ ({});
+            type = request.type;
+        } catch (err) {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: `Hermes client: request fields could not be read (${toErrorString(err)})`,
+            }));
+        }
 
         if (typeof type !== "string" || type.length === 0) {
             return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
@@ -166,12 +173,34 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
             }));
         }
 
+        let payload;
+        let timeoutMs;
+        let signal;
+        let transfer;
+        try {
+            payload = request.payload;
+            timeoutMs = request.timeoutMs;
+            signal = request.signal;
+            transfer = request.transfer;
+        } catch (err) {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: `Hermes client: request fields could not be read (${toErrorString(err)})`,
+            }));
+        }
+
+        if (timeoutMs != null && typeof timeoutMs !== "number") {
+            return Promise.resolve(/** @type {HermesClientResponse<any>} */ ({
+                ok: false,
+                error: "Hermes client: request.timeoutMs must be a number",
+            }));
+        }
         return new Promise((resolve) => {
             let requestId;
             try {
                 requestId = idGen();
             } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
+                const message = toErrorString(err);
                 resolve({
                     ok: false,
                     error: `Hermes client: requestId generation failed (${message})`,
@@ -212,17 +241,17 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
                 settled = true;
                 pending.delete(requestId);
                 if (timeoutHandle !== null) clearTimeout(timeoutHandle);
-                if (signal && signalHandler) signal.removeEventListener("abort", signalHandler);
+                if (signal && signalHandler) {
+                    try { signal.removeEventListener("abort", signalHandler); }
+                    catch { /* cleanup failure must not prevent settlement */ }
+                }
                 resolve(response);
             };
 
-            /** @param {any} msg */
-            const onWireResponse = (msg) => {
-                settle(/** @type {HermesClientResponse<any>} */ (parseWireResponse(msg, { requestId })));
-            };
-
+            // Publish the entry before signal setup and send, which can both
+            // call back synchronously.
             pending.set(requestId, {
-                onWireResponse,
+                onWireResponse: (message) => settle(parseWireResponse(message, { requestId })),
                 close: () => settle(closedResponse({ requestId, type })),
             });
 
@@ -237,25 +266,44 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
             }
 
             if (signal) {
-                if (signal.aborted) {
-                    settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                try {
+                    if (signal.aborted) {
+                        settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                        return;
+                    }
+                    signalHandler = () => {
+                        settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
+                    };
+                    signal.addEventListener("abort", signalHandler, { once: true });
+                } catch (err) {
+                    settle({
+                        ok: false,
+                        error: `Hermes client: AbortSignal setup failed (${toErrorString(err)})`,
+                        info: { requestId, type },
+                    });
                     return;
                 }
-                signalHandler = () => {
-                    settle({ ok: false, error: "Aborted", info: { aborted: true, requestId } });
-                };
-                signal.addEventListener("abort", signalHandler, { once: true });
             }
+            if (settled) return;
 
-            try {
-                send({ type, payload, requestId }, transfer);
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
+            const onSendFailure = (err) => {
+                const message = toErrorString(err);
                 settle({
                     ok: false,
                     error: `Hermes client: send failed (${message})`,
                     info: { requestId, type },
                 });
+            };
+
+            try {
+                const sendResult = send({ type, payload, requestId }, transfer);
+                if (sendResult !== undefined) {
+                    const observed = Promise.resolve(sendResult);
+                    // A transport can return a native promise with a throwing `then` getter.
+                    Promise.prototype.then.call(observed, undefined, onSendFailure);
+                }
+            } catch (err) {
+                onSendFailure(err);
             }
         });
     }
@@ -277,18 +325,13 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
             throw new TypeError("dispatch.on: handler must be a function");
         }
         if (closed) return () => {};
-        let set = broadcastHandlers.get(type);
-        if (!set) {
-            set = new Set();
-            broadcastHandlers.set(type, set);
+        let handlers = broadcastHandlers.get(type);
+        if (!handlers) {
+            handlers = new Set();
+            broadcastHandlers.set(type, handlers);
         }
-        set.add(handler);
-        return () => {
-            const s = broadcastHandlers.get(type);
-            if (!s) return;
-            s.delete(handler);
-            if (s.size === 0) broadcastHandlers.delete(type);
-        };
+        handlers.add(handler);
+        return () => off(type, handler);
     };
 
     /**
@@ -298,12 +341,13 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
      * @param {string} type
      * @param {(payload: any, msg: any) => void} handler
      */
-    dispatch.off = function off(type, handler) {
-        const s = broadcastHandlers.get(type);
-        if (!s) return;
-        s.delete(handler);
-        if (s.size === 0) broadcastHandlers.delete(type);
-    };
+    function off(type, handler) {
+        const handlers = broadcastHandlers.get(type);
+        if (!handlers) return;
+        handlers.delete(handler);
+        if (handlers.size === 0) broadcastHandlers.delete(type);
+    }
+    dispatch.off = off;
 
     /**
      * Tear down the transport subscription. After calling `.close()`, the
@@ -312,6 +356,7 @@ export function createHermesClient({ send, subscribe, defaultTimeoutMs = 5000, i
      */
     dispatch.close = function close() {
         if (closed) return;
+        // A transport can deliver messages while unsubscribing.
         closed = true;
 
         const unsubscribe = unsubscribeTransport;

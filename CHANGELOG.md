@@ -2,13 +2,17 @@
 
 What changed for people using the package, per release. Entries before 1.1.0 were reconstructed from git history.
 
-## 1.2.0 — 2026-11-15
+## 1.2.0 — 2026-11-15 (unreleased)
 
 - New `hermes-handler/guard` subpath with `defineBoundary`, `classifySender` and `createGuard`: declare the message names a listener accepts and which senders may send each one.
 - `defineBoundary(...).pair(handlers)` checks handlers against the declared names at start-up and applies each rule's `timeoutMs`.
 - Guard refusals are `{ ok: false, error, info: { code, type } }` with `code` `UNKNOWN_TYPE` or `SENDER_REFUSED`; the guard reads no payload and logs nothing.
-- A guard `gate` returns `null` to allow a message or a refusal with `ok: false`; any other return value throws instead of answering for the handler.
+- A guard `gate` allows a message with `null` or `undefined`, or answers with a refusal that has `ok: false`. Other return values throw.
 - `client.close()` ignores replies and broadcasts emitted during transport teardown.
+- The router keeps error responses deterministic even if a custom `onError` hook or logger throws. A runtime listener declines a message when its `shouldHandle` predicate throws.
+- Client dispatches resolve with a correlated error when a transport send throws or rejects. Malformed replies for pending requests resolve with an error envelope.
+- `servePostMessage` correlates dispatch failures, preserves transfer lists when adding a request ID, and consumes fire-and-forget dispatch rejections. Failed `MessagePort` startup rolls back the listener on both sides.
+- `RoutesOf` derives client routes from a router, and the client subpath supports the same generic route inference as the package root.
 
 ## 1.1.1 — 2026-11-02
 
