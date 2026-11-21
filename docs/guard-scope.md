@@ -1,61 +1,87 @@
 # Scope: `hermes-handler/guard`
 
-Status: the owner approved the recommended options on 2026-11-15. The guard is
-in the unpublished 1.2.0 candidate. The extension pilots ran in isolated
-copies. Consumers have yet to adopt the guard.
+The guard is in the unpublished 1.2.0 candidate. WebRadar, SpellBolt, and
+Helios completed their supported browser pilots. Consumer adoption is a
+separate step.
 
 ## Candidate verification and browser handoff
 
-All three pilots used `hermes-handler-1.2.0.tgz` packed from `e8f21f9` on
-`codex/messaging-hardening`. Its SHA-256 is
-`656019c162a691a4023867fe29a5401d94eebf6f2cfb27dbaf507b4478c223cc`.
-
-The prepared release archive has SHA-256
+The release archive `hermes-handler-1.2.0.tgz` is based on source commit
+`e8f21f9` and the README correction in `84b5d2f`. Its SHA-256 is
 `23a17b3f34851df9f7a27e89299572c8195dc14ec9cf71b777f77ae87327caec`.
-Only `README.md` changed in the archive to clarify the gate return values.
-The runtime files, declarations, and manifest are byte-identical, so the
-WebRadar browser evidence still applies. Use the prepared archive for the
-remaining browser checks and verify its hash before building either extension.
+SpellBolt and Helios used this exact archive. WebRadar used the earlier archive
+with SHA-256
+`656019c162a691a4023867fe29a5401d94eebf6f2cfb27dbaf507b4478c223cc`.
+The archives contain the same 32 files. Only `README.md` differs, so WebRadar
+exercised the same runtime files and declarations.
 
-| Consumer | Proven in the pilot | Remaining browser evidence |
-| --- | --- | --- |
-| WebRadar (`7cca256`) | Chromium exercised six runtime routes. The native toolbar popup supplied no `sender.tab`; an explicit tab ID reached the intended session, and missing and malformed IDs received no response. | Covered for this candidate. |
-| Helios (`d89556ba`) | The background-only guard pilot preserved sender policy, the refusal and unknown-route envelopes, and `runtime_handler_timeout`. The Node suite reported 7,845 passes and four existing TODOs. Chromium and Firefox package checks passed. | One targeted live check run through the operator's approved Lab installation and bridge. |
-| SpellBolt (`df732170`) | The installed 1.1.1 baseline and packed 1.2.0 matched the representative 1.x replies. The guard matched 424 refusal cases and 424 dispatch cases. The current esbuild/Terser release build and Chrome and Firefox package checks passed. | One targeted run through SpellBolt's approved managed Chromium launcher. |
+### WebRadar
 
-### Helios operator check
+The isolated Chromium pilot at `7cca256` passed six runtime routes across the
+page, popup, and diagnostics checks. In the native toolbar popup, the request
+sender had no `sender.tab`. A valid explicit tab ID reached the intended console
+session for both writes and reads. Requests with missing or malformed IDs
+received no response. The harnesses are `webradar-browser-pilot/pilot-browser.mjs`
+and `webradar-browser-pilot/native-popup-pilot.mjs` in the pilot artifacts.
 
-The operator arranges an approved Lab build using the packed candidate and
-runs the check in an already-open Lab profile. Record which artifact is
-installed before using the live bridge or extension self-test. Helios keeps
-browser launches and installed-extension changes under its operator workflow.
+### SpellBolt
 
-- Exercise an extension-only request from an allowed extension page and an
-  own-content request such as `CONTENT_READY` from its allowed sender.
-- Check that a refused sender receives `runtime_sender_rejected` with the
-  expected `info.code`, `info.type`, and request ID when supplied.
-- Check the standard unknown-route response and a controlled handler timeout.
-  The timeout reply carries `runtime_handler_timeout`. The internal dev bridge
-  keeps its separate direct-call path.
+The production pilot used base `df732170` and isolated commit `8b2303a3`. Its
+final run passed all seven cases on Chromium `148.0.7778.96` in the seeded test
+slot. Popup settings and page spellcheck requests succeeded. Pre-dispatch
+unknown-route, `SENDER_REFUSED`, and `FEATURE_HELD` replies omitted `requestId`.
+The sender restriction ran before the feature gate, and the invalid-payload
+reply carried `info.code: INVALID_PAYLOAD` and echoed the request ID. The held
+stream port disconnected without sending data. The test slot closed with no
+Chromium process remaining.
 
-### SpellBolt managed Chromium check
+The guard matched the original SpellBolt router on HermesHandler 1.1.1 in
+424 refusal cases and 424 dispatch cases offline. The Chromium and Firefox
+MV2 and MV3 package checks passed. A focused rerun with scratch Git metadata
+passed all 29 tests across the four files with earlier source-discovery
+failures. Evidence under `spellbolt-guard-pilot/` includes
+`verified-build-receipt.json`, `spellbolt-live-retry.log`,
+`spellbolt-guard-parity-release.log`, and `spellbolt-source-checks-recheck.log`.
 
-Get approval for the specific browser run under SpellBolt's testing doctrine.
-Use its seeded launcher and an isolated profile, with one targeted run and
-local fixtures. Keep provider calls and personal account data out of the run.
+### Helios
 
-- Exercise a page spellcheck request and an extension-only popup request.
-  Verify that an unknown route, a refused sender, and a held feature are
-  handled in that order. `SENDER_REFUSED` and `FEATURE_HELD` stay top-level.
-  Pre-dispatch refusals omit `requestId`, while dispatched replies echo it
-  when supplied.
-- Exercise an invalid payload or a controlled readiness timeout. In the
-  release build, `ENHANCE_TEXT_STREAM` continues through its separate port
-  check and returns the held-feature refusal without opening a provider call.
+The Lab pilot used local main at `d89556ba` with the guard adapter and temporary
+tarball pin. The operator loaded Lab build `a4779327f2e7cf16` in Brave Web Lab
+(Chromium 158). The bridge matched the running build and source hash to the
+candidate and reported three passes. The browser reported a service-worker
+background, an extension-page `GET_PLAN_APPROVAL` request returned `ok: true`,
+and the content-script fixture completed its plan on the IANA example-domains
+page. The self-test uses temporary tabs in the already-open Web Lab profile.
 
-For each remaining check, record the app revision, candidate hash, browser
-and profile, cases exercised, actual replies, and cleanup result. Keep the
-pilot copies separate from the source checkouts.
+Offline checks covered the direct `CONTENT_READY` acknowledgement,
+`runtime_sender_rejected` details and correlation, the standard unknown-route
+reply, and the controlled `runtime_handler_timeout` envelope. The live
+self-test covers extension-page messaging and content-script execution. The
+Helios Node suite reported 7,845 passes and four existing TODOs. Chromium,
+Firefox, and Firefox Lab package checks passed. The pilot artifacts include
+`helios-main-candidate-receipt.json`, `helios-web-lab-freshness.json`,
+`helios-web-lab-selftest.json`, and `helios-offline-contracts.log`.
+
+### Release approval
+
+The release recheck passed all 316 tests, the source and package-consumer
+type checks, lint, documentation links, both example checks, and the package
+dry run. An isolated consumer imported all six entry points from the verified
+archive and passed the package-consumer type check and a guard dispatch smoke
+test. GitHub `main` matched the candidate's upstream base `57b35ed`. The npm
+registry listed `1.1.1` as `latest` and had no entry for `1.2.0`.
+The final evidence, package, and compatibility reviews found no release
+blockers.
+
+A fresh pack contained the same 32 files. The only payload differences were
+LF versus CRLF line endings in `dist/guard.js` and
+`dist/transports/chrome-runtime.js`. Keep the verified tarball and checksum
+together. Recheck GitHub `main` and npm before release, then follow the
+[publishing checklist](PUBLISHING.md) with the archive identified above. Get
+explicit approval before pushing any commit or publishing that archive.
+
+The local Helios tarball pin is for the pilot. Consumer adoption can use the
+registry version once it exists.
 
 ## Summary
 
